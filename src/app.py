@@ -1,6 +1,15 @@
-from flask import Flask, jsonify, request, render_template
+from flask import Flask, jsonify, request, render_template, redirect, url_for
+import os
+from supabase import Client, create_client
 
 app = Flask(__name__)
+
+# Initialisation du client Supabase si les variables d'environnement sont définies
+supabase_url = os.getenv("SUPABASE_URL")
+supabase_key = os.getenv("SUPABASE_ANON_KEY")
+supabase: Client | None = None
+if supabase_url and supabase_key:
+    supabase = create_client(supabase_url, supabase_key)
 
 
 @app.get("/")
@@ -15,16 +24,36 @@ def index():
     return jsonify({"message": "API de génération vidéo"})
 
 
-@app.get("/login")
+@app.route("/login", methods=["GET", "POST"])
 def login():
-    """Placeholder pour la page de connexion."""
-    return "Page de connexion", 200
+    """Affiche le formulaire de connexion et authentifie l'utilisateur via Supabase."""
+    if request.method == "POST" and supabase:
+        email = request.form.get("email")
+        password = request.form.get("password")
+        try:
+            supabase.auth.sign_in_with_password({"email": email, "password": password})
+            return redirect(url_for("home"))
+        except Exception as exc:  # pragma: no cover - dépend de Supabase
+            return f"Erreur de connexion : {exc}", 400
+    return render_template("login.html")
 
 
-@app.get("/register")
+@app.route("/register", methods=["GET", "POST"])
 def register():
-    """Placeholder pour la page de création de compte."""
-    return "Page de création de compte", 200
+    """Affiche le formulaire d'inscription et crée un compte Supabase."""
+    if request.method == "POST" and supabase:
+        username = request.form.get("username")
+        email = request.form.get("email")
+        password = request.form.get("password")
+        try:
+            result = supabase.auth.sign_up({"email": email, "password": password})
+            user_id = result.user.id  # type: ignore[assignment]
+            # Enregistre les informations supplémentaires dans la table profiles
+            supabase.table("profiles").insert({"id": user_id, "username": username}).execute()
+            return redirect(url_for("login"))
+        except Exception as exc:  # pragma: no cover - dépend de Supabase
+            return f"Erreur lors de l'inscription : {exc}", 400
+    return render_template("register.html")
 
 
 @app.post("/generate")

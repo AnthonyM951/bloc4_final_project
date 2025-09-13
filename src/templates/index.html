@@ -1,48 +1,7 @@
-<!DOCTYPE html>
-<html lang="fr">
-<head>
-  <meta charset="UTF-8" />
-  <title>AI Video Generator</title>
-  <style>
-    body {
-      margin: 0;
-      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-      background: radial-gradient(circle at top left, #0f0c29, #302b63, #24243e);
-      color: #fff;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      height: 100vh;
-    }
-    .container {
-      text-align: center;
-    }
-    h1 {
-      margin-bottom: 2rem;
-      text-shadow: 0 0 10px #00e6e6;
-    }
-    .btn {
-      padding: 1rem 2rem;
-      margin: 0 1rem;
-      border: none;
-      border-radius: 4px;
-      font-size: 1rem;
-      cursor: pointer;
-      color: #fff;
-      background: linear-gradient(45deg, #00e6e6, #0073e6);
-      box-shadow: 0 0 15px #00e6e6;
-      transition: transform 0.2s;
-    }
-    .btn:hover {
-      transform: scale(1.05);
-    }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <h1>Générateur de Vidéo IA</h1>
-    <button class="btn" onclick="location.href='/login'">Connexion</button>
-    <button class="btn" onclick="location.href='/register'">Créer un compte</button>
-  </div>
-</body>
-</html>
+{% extends 'base.html' %}
+{% block title %}AI Video Generator{% endblock %}
+{% block content %}
+<h1>Générateur de Vidéo IA</h1>
+<button class="btn" onclick="location.href='/login'">Connexion</button>
+<button class="btn" onclick="location.href='/register'">Créer un compte</button>
+{% endblock %}

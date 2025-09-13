@@ -13,3 +13,28 @@ pip install -r requirements.txt
 pytest
 flask run
 ```
+
+## Intégration Supabase
+
+L'application peut s'appuyer sur [Supabase](https://supabase.com) pour la
+gestion des utilisateurs. Pour l'activer :
+
+1. Créez un projet Supabase et récupérez l'URL du projet, la clé anonyme
+   et l'URL de connexion à la base de données.
+2. Exportez les variables d'environnement nécessaires :
+
+   ```bash
+   export SUPABASE_URL="https://xyz.supabase.co"
+   export SUPABASE_ANON_KEY="votre_clé_anon"
+   export SUPABASE_DB_URL="postgresql://..."  # clé service role
+   ```
+
+3. Initialisez la table `profiles` utilisée par le formulaire
+   d'inscription :
+
+   ```bash
+   python scripts/create_supabase_tables.py
+   ```
+
+4. Lancez l'application (`flask run`) puis rendez-vous sur `/register`
+   pour créer un compte qui sera stocké dans Supabase.
