@@ -1,6 +1,5 @@
 import os
 import sys
-import json
 
 # Ajoute le répertoire parent au PYTHONPATH pour import local
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
@@ -8,11 +7,21 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from app import app  # type: ignore
 
 
-def test_index():
+def test_home_page():
     client = app.test_client()
     resp = client.get("/")
     assert resp.status_code == 200
-    data = json.loads(resp.data)
+    # Vérifie que les boutons de connexion et création de compte sont présents
+    page = resp.data.decode("utf-8")
+    assert "Connexion" in page
+    assert "Créer un compte" in page
+
+
+def test_api_index():
+    client = app.test_client()
+    resp = client.get("/api")
+    assert resp.status_code == 200
+    data = resp.get_json()
     assert data["message"] == "API de génération vidéo"
 
 
