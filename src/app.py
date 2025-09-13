@@ -15,7 +15,6 @@ def index():
     return jsonify({"message": "API de génération vidéo"})
 
 
-<<<<<<< ours
 @app.get("/login")
 def login():
     """Placeholder pour la page de connexion."""
@@ -26,24 +25,6 @@ def login():
 def register():
     """Placeholder pour la page de création de compte."""
     return "Page de création de compte", 200
-=======
-@app.route("/login", methods=["GET", "POST"])
-def login():
-    """Render login page and accept credentials."""
-    if request.method == "POST":
-        # Logique d'authentification à implémenter
-        return jsonify({"status": "ok"})
-    return render_template("login.html")
-
-
-@app.route("/register", methods=["GET", "POST"])
-def register():
-    """Render registration page and create a user."""
-    if request.method == "POST":
-        # Logique de création d'utilisateur à implémenter
-        return jsonify({"status": "created"}), 201
-    return render_template("register.html")
->>>>>>> theirs
 
 
 @app.post("/generate")
