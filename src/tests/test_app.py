@@ -32,3 +32,21 @@ def test_generate_video():
     data = resp.get_json()
     assert data["status"] == "processing"
     assert data["prompt"] == "test"
+
+
+def test_login_page():
+    client = app.test_client()
+    resp = client.get("/login")
+    assert resp.status_code == 200
+    page = resp.data.decode("utf-8")
+    assert "Connexion" in page
+    assert "<form" in page
+
+
+def test_register_page():
+    client = app.test_client()
+    resp = client.get("/register")
+    assert resp.status_code == 200
+    page = resp.data.decode("utf-8")
+    assert "Créer un compte" in page
+    assert "<form" in page
