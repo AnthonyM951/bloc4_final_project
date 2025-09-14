@@ -7,6 +7,9 @@
   <div class="space-x-4">
     {% if session.get('user_id') %}
     <a href="/generate" class="px-6 py-3 rounded-md bg-teal-500 hover:bg-teal-400 text-slate-900 font-semibold">Essayer</a>
+    {% if session.get('role') == 'admin' %}
+    <a href="/admin" class="px-6 py-3 rounded-md bg-indigo-500 hover:bg-indigo-400 text-slate-900 font-semibold">Admin</a>
+    {% endif %}
     {% else %}
     <a href="/login" class="px-6 py-3 rounded-md border border-teal-500 text-teal-400 hover:bg-teal-500/10">Connexion</a>
     <a href="/register" class="px-6 py-3 rounded-md border border-teal-500 text-teal-400 hover:bg-teal-500/10">Créer un compte</a>

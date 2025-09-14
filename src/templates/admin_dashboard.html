@@ -20,6 +20,21 @@
     </table>
   </section>
   <section>
+    <h2 class="text-xl font-semibold mb-2">KPIs quotidiens</h2>
+    <canvas id="kpi-chart" class="w-full h-64"></canvas>
+    <table class="min-w-full text-sm mt-4">
+      <thead>
+        <tr class="text-left">
+          <th class="px-2 py-1">Jour</th>
+          <th class="px-2 py-1">Jobs</th>
+          <th class="px-2 py-1">GPU min</th>
+          <th class="px-2 py-1">Coût (cents)</th>
+        </tr>
+      </thead>
+      <tbody id="kpi-body"></tbody>
+    </table>
+  </section>
+  <section>
     <h2 class="text-xl font-semibold mb-2">Users</h2>
     <table class="min-w-full text-sm" id="admin-users-table">
       <thead>
@@ -33,6 +48,7 @@
     </table>
   </section>
 </div>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script>
 async function loadAdmin() {
   const jobsRes = await fetch('/admin/list_jobs');
@@ -64,6 +80,39 @@ async function loadAdmin() {
                    `<td class="px-2 py-1">${u.role}</td>`+
                    `<td class="px-2 py-1">${u.gpu_minutes_quota}</td>`;
     usersBody.appendChild(tr);
+  });
+
+  const kpiRes = await fetch('/admin/kpis');
+  const kpis = await kpiRes.json();
+  const kpiBody = document.getElementById('kpi-body');
+  kpiBody.innerHTML = '';
+  const labels = [];
+  const jobsData = [];
+  const gpuData = [];
+  const costData = [];
+  kpis.reverse().forEach(k => {
+    labels.push(k.day);
+    jobsData.push(k.jobs);
+    gpuData.push(k.gpu_minutes);
+    costData.push(k.cost_cents);
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td class="px-2 py-1">${k.day}</td>`+
+                   `<td class="px-2 py-1">${k.jobs}</td>`+
+                   `<td class="px-2 py-1">${k.gpu_minutes}</td>`+
+                   `<td class="px-2 py-1">${k.cost_cents}</td>`;
+    kpiBody.appendChild(tr);
+  });
+  const ctx = document.getElementById('kpi-chart');
+  new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: labels,
+      datasets: [
+        { label: 'Jobs', data: jobsData, borderColor: 'teal', tension: 0.3 },
+        { label: 'GPU min', data: gpuData, borderColor: 'orange', tension: 0.3 },
+        { label: 'Coût (cents)', data: costData, borderColor: 'purple', tension: 0.3 }
+      ]
+    }
   });
 }
 
