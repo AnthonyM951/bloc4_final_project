@@ -26,6 +26,15 @@ create table if not exists profiles (
 );
 """
 
+CREATE_FILES = """
+create table if not exists files (
+    id bigserial primary key,
+    url text not null,
+    bucket text,
+    created_at timestamp with time zone default now()
+);
+"""
+
 def main() -> None:
     db_url = os.getenv("SUPABASE_DB_URL")
     if not db_url:
@@ -34,6 +43,7 @@ def main() -> None:
     try:
         with conn, conn.cursor() as cur:
             cur.execute(CREATE_PROFILES)
+            cur.execute(CREATE_FILES)
     finally:
         conn.close()
 

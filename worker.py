@@ -61,10 +61,36 @@ def process_video_job(job_id: int) -> None:
             conn.commit()
 
         # Appel à fal.ai (bloquant jusqu'à ce que le rendu soit prêt)
-        fal_client.subscribe(
+        response = fal_client.subscribe(
             "fal-ai/flux/dev",
             arguments={"prompt": prompt},
         )
+
+        # Récupère l'URL du rendu pour l'enregistrer dans la table files
+        video_url = None
+        if isinstance(response, dict):
+            video = response.get("video")
+            if isinstance(video, dict):
+                video_url = video.get("url")
+            elif isinstance(video, str):
+                video_url = video
+            else:
+                video_url = response.get("url")
+
+        file_id = None
+        if video_url:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO files (url, bucket, created_at)
+                    VALUES (%s, %s, now())
+                    RETURNING id
+                    """,
+                    (video_url, "videos"),
+                )
+                row = cur.fetchone()
+                file_id = row[0] if row else None
+                conn.commit()
 
         # Les champs sont simplifiés pour l'exemple
         with conn.cursor() as cur:
@@ -83,7 +109,7 @@ def process_video_job(job_id: int) -> None:
                     1280,
                     720,
                     30.0,
-                    None,
+                    file_id,
                     job_id,
                 ),
             )
