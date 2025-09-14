@@ -60,11 +60,54 @@ def process_video_job(job_id: int) -> None:
             )
             conn.commit()
 
-        # Appel à fal.ai (bloquant jusqu'à ce que le rendu soit prêt)
-        fal_client.subscribe(
-            "fal-ai/flux/dev",
-            arguments={"prompt": prompt},
+        # Appel à fal.ai en soumettant un job puis en attendant le résultat
+        handle = fal_client.submit(
+            "fal-ai/flux/dev", arguments={"prompt": prompt}
         )
+        request_id = getattr(handle, "request_id", None)
+        if request_id:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE jobs SET external_id = %s WHERE id = %s",
+                    (request_id, job_id),
+                )
+                conn.commit()
+
+        response = handle.get()
+        fal_status = getattr(handle, "status", None)
+        if fal_status:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE jobs SET external_status = %s WHERE id = %s",
+                    (fal_status, job_id),
+                )
+                conn.commit()
+
+        # Récupère l'URL du rendu pour l'enregistrer dans la table files
+        video_url = None
+        if isinstance(response, dict):
+            video = response.get("video")
+            if isinstance(video, dict):
+                video_url = video.get("url")
+            elif isinstance(video, str):
+                video_url = video
+            else:
+                video_url = response.get("url")
+
+        file_id = None
+        if video_url:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO files (url, bucket, created_at)
+                    VALUES (%s, %s, now())
+                    RETURNING id
+                    """,
+                    (video_url, "videos"),
+                )
+                row = cur.fetchone()
+                file_id = row[0] if row else None
+                conn.commit()
 
         # Les champs sont simplifiés pour l'exemple
         with conn.cursor() as cur:
@@ -83,7 +126,7 @@ def process_video_job(job_id: int) -> None:
                     1280,
                     720,
                     30.0,
-                    None,
+                    file_id,
                     job_id,
                 ),
             )

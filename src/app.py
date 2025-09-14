@@ -2,7 +2,7 @@ import json
 import os
 import re
 import psycopg2
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, render_template, request, redirect, url_for, session
 from dotenv import load_dotenv
 from supabase import Client, create_client
 try:
@@ -13,6 +13,7 @@ except Exception:  # pragma: no cover
 load_dotenv()
 
 app = Flask(__name__)
+app.secret_key = os.getenv("FLASK_SECRET", "dev-secret")
 
 # Regex pour validation email et mot de passe
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -88,15 +89,23 @@ def login():
                     )
                     row = cur.fetchone()
                     if row:
-                        return jsonify(
-                            {
-                                "user_id": user.id,
-                                "email": email,
-                                "role": row[0],
-                                "gpu_minutes_quota": row[1],
-                            }
-                        ), 200
-            return jsonify({"user_id": user.id, "email": email}), 200
+                        session["user_id"] = user.id
+                        session["email"] = email
+                        if request.is_json:
+                            return jsonify(
+                                {
+                                    "user_id": user.id,
+                                    "email": email,
+                                    "role": row[0],
+                                    "gpu_minutes_quota": row[1],
+                                }
+                            ), 200
+                        return redirect(url_for("generate_page"))
+            session["user_id"] = user.id
+            session["email"] = email
+            if request.is_json:
+                return jsonify({"user_id": user.id, "email": email}), 200
+            return redirect(url_for("generate_page"))
 
         except Exception as e:
             return jsonify({"error": str(e)}), 400
@@ -147,13 +156,32 @@ def register():
                 )
                 conn.commit()
 
-            return jsonify({"user_id": user_id, "username": clean_username}), 201
+            session["user_id"] = user_id
+            session["email"] = email
+            if request.is_json:
+                return jsonify({"user_id": user_id, "username": clean_username}), 201
+            return redirect(url_for("generate_page"))
 
         except Exception as e:
             conn.rollback()
             return jsonify({"error": str(e)}), 400
 
     return render_template("register.html")
+
+
+@app.get("/generate")
+def generate_page():
+    """Page de génération vidéo"""
+    if not session.get("user_id"):
+        return redirect(url_for("login"))
+    return render_template("generate.html")
+
+
+@app.get("/logout")
+def logout():
+    """Déconnexion utilisateur"""
+    session.clear()
+    return redirect(url_for("home"))
 
 
 @app.post("/generate")
