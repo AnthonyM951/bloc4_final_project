@@ -50,3 +50,21 @@ def test_register_page():
     page = resp.data.decode("utf-8")
     assert "Créer un compte" in page
     assert "<form" in page
+
+
+def test_register_invalid_email():
+    client = app.test_client()
+    resp = client.post("/register", json={"email": "invalid", "username": "User", "password": "Password1"})
+    assert resp.status_code == 400
+
+
+def test_register_invalid_password():
+    client = app.test_client()
+    resp = client.post("/register", json={"email": "user@example.com", "username": "User", "password": "short"})
+    assert resp.status_code == 400
+
+
+def test_register_invalid_username():
+    client = app.test_client()
+    resp = client.post("/register", json={"email": "user@example.com", "username": "Bad!User", "password": "Password1"})
+    assert resp.status_code == 400

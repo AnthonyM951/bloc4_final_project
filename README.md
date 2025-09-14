@@ -29,7 +29,7 @@ gestion des utilisateurs. Pour l'activer :
    export SUPABASE_DB_URL="postgresql://..."  # clé service role
    ```
 
-3. Initialisez la table `profiles` utilisée par le formulaire
+3. Initialisez la table `profiles` (email et mot de passe hashé) utilisée par le formulaire
    d'inscription :
 
    ```bash

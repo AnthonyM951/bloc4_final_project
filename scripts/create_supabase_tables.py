@@ -18,8 +18,10 @@ import psycopg2
 
 CREATE_PROFILES = """
 create table if not exists profiles (
-    id uuid references auth.users primary key,
+    id uuid primary key,
     username text,
+    email text unique,
+    password_hash text,
     created_at timestamp with time zone default now()
 );
 """
