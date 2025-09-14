@@ -1,5 +1,8 @@
 import json
 import os
+import re
+import uuid
+import hashlib
 
 import psycopg2
 from flask import Flask, jsonify, render_template, request
@@ -9,6 +12,14 @@ load_dotenv()
 
 
 app = Flask(__name__)
+
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+PASSWORD_RE = re.compile(r"^(?=.*[A-Z])(?=.*\d).{8,}$")
+
+
+def sanitize_text(text: str) -> str:
+    """Remove characters that are not alphanumeric, dash or underscore."""
+    return re.sub(r"[^a-zA-Z0-9_-]", "", text)
 
 # 🔑 Connexion Postgres (infos depuis Dashboard Supabase -> Database -> Connection info)
 try:
@@ -49,7 +60,33 @@ def login():
 def register():
     """Page de création de compte."""
     if request.method == "POST":
-        return "Registration submitted", 200
+        data = request.get_json(silent=True) or request.form
+        username = data.get("username", "")
+        email = data.get("email", "")
+        password = data.get("password", "")
+
+        if not EMAIL_RE.match(email):
+            return jsonify({"error": "Invalid email"}), 400
+        if not PASSWORD_RE.match(password):
+            return jsonify({"error": "Weak password"}), 400
+
+        clean_username = sanitize_text(username)
+        if conn is None:
+            return jsonify({"error": "Database connection not available"}), 500
+
+        pw_hash = hashlib.sha256(password.encode()).hexdigest()
+        try:
+            with conn.cursor() as cur:
+                user_id = str(uuid.uuid4())
+                cur.execute(
+                    "INSERT INTO profiles (id, username, email, password_hash) VALUES (%s, %s, %s, %s)",
+                    (user_id, clean_username, email, pw_hash),
+                )
+                conn.commit()
+            return jsonify({"id": user_id, "username": clean_username}), 201
+        except Exception as e:
+            conn.rollback()
+            return jsonify({"error": str(e)}), 400
     return render_template("register.html")
 
 
