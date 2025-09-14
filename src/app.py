@@ -94,6 +94,8 @@ def login():
             profile_payload = {"user_id": user.id, "email": email}
             session["role"] = "user"
             if conn:
+                # Ensure the connection is in a clean state before querying
+                conn.rollback()
                 with conn.cursor() as cur:
                     cur.execute(
                         "SELECT role, gpu_minutes_quota FROM profiles WHERE user_id = %s",
@@ -111,6 +113,8 @@ def login():
             return redirect(url_for("dashboard"))
 
         except Exception as e:
+            if conn:
+                conn.rollback()
             return jsonify({"error": str(e)}), 400
 
     return render_template("login.html")
@@ -148,6 +152,7 @@ def register():
             user_id = user.id
 
             # 2️⃣ Créer le profil applicatif
+            conn.rollback()
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -216,6 +221,7 @@ def submit_job():
     params = data.get("params", {})
 
     try:
+        conn.rollback()
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -254,6 +260,7 @@ def list_jobs(user_id):
         return jsonify({"error": "Database connection not available"}), 500
 
     try:
+        conn.rollback()
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -279,6 +286,71 @@ def list_jobs(user_id):
         ]
         return jsonify(jobs)
     except Exception as e:
+        if conn:
+            conn.rollback()
+        return jsonify({"error": str(e)}), 400
+
+
+@app.get("/admin/list_jobs")
+def admin_list_jobs():
+    """Lister tous les jobs (admin)"""
+    if session.get("role") != "admin":
+        return jsonify({"error": "forbidden"}), 403
+    if conn is None:
+        return jsonify({"error": "Database connection not available"}), 500
+    try:
+        conn.rollback()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT j.id, j.user_id, j.prompt, j.status, j.submitted_at, f.url
+                FROM jobs j
+                LEFT JOIN videos v ON v.job_id = j.id
+                LEFT JOIN files f ON f.id = v.file_id
+                ORDER BY j.submitted_at DESC
+                """
+            )
+            rows = cur.fetchall()
+        jobs = [
+            {
+                "id": r[0],
+                "user_id": r[1],
+                "prompt": r[2],
+                "status": r[3],
+                "submitted_at": r[4].isoformat(),
+                "video_url": r[5],
+            }
+            for r in rows
+        ]
+        return jsonify(jobs)
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        return jsonify({"error": str(e)}), 400
+
+
+@app.get("/admin/list_users")
+def admin_list_users():
+    """Lister les utilisateurs"""
+    if session.get("role") != "admin":
+        return jsonify({"error": "forbidden"}), 403
+    if conn is None:
+        return jsonify({"error": "Database connection not available"}), 500
+    try:
+        conn.rollback()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT user_id, role, gpu_minutes_quota FROM profiles ORDER BY user_id"
+            )
+            rows = cur.fetchall()
+        users = [
+            {"user_id": r[0], "role": r[1], "gpu_minutes_quota": r[2]}
+            for r in rows
+        ]
+        return jsonify(users)
+    except Exception as e:
+        if conn:
+            conn.rollback()
         return jsonify({"error": str(e)}), 400
 
 
