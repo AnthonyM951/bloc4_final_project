@@ -120,6 +120,13 @@ def login():
     return render_template("login.html")
 
 
+@app.get("/logout")
+def logout():
+    """Déconnexion utilisateur"""
+    session.clear()
+    return redirect(url_for("login"))
+
+
 @app.route("/register", methods=["GET", "POST"])
 def register():
     """Inscription utilisateur"""
