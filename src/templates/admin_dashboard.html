@@ -1,0 +1,72 @@
+{% extends 'base.html' %}
+{% block title %}Admin Dashboard{% endblock %}
+{% block content %}
+<div class="space-y-8">
+  <h1 class="text-3xl font-semibold text-center">Admin Dashboard</h1>
+  <section>
+    <h2 class="text-xl font-semibold mb-2">Jobs</h2>
+    <table class="min-w-full text-sm" id="admin-jobs-table">
+      <thead>
+        <tr class="text-left">
+          <th class="px-2 py-1">ID</th>
+          <th class="px-2 py-1">User</th>
+          <th class="px-2 py-1">Prompt</th>
+          <th class="px-2 py-1">Status</th>
+          <th class="px-2 py-1">Submitted</th>
+          <th class="px-2 py-1">Video</th>
+        </tr>
+      </thead>
+      <tbody id="admin-jobs-body"></tbody>
+    </table>
+  </section>
+  <section>
+    <h2 class="text-xl font-semibold mb-2">Users</h2>
+    <table class="min-w-full text-sm" id="admin-users-table">
+      <thead>
+        <tr class="text-left">
+          <th class="px-2 py-1">User ID</th>
+          <th class="px-2 py-1">Role</th>
+          <th class="px-2 py-1">GPU Minutes</th>
+        </tr>
+      </thead>
+      <tbody id="admin-users-body"></tbody>
+    </table>
+  </section>
+</div>
+<script>
+async function loadAdmin() {
+  const jobsRes = await fetch('/admin/list_jobs');
+  const jobs = await jobsRes.json();
+  const jobsBody = document.getElementById('admin-jobs-body');
+  jobsBody.innerHTML = '';
+  jobs.forEach(j => {
+    let videoLinks = '';
+    if (j.video_url) {
+      videoLinks = `<a href="${j.video_url}" target="_blank" class="text-teal-400">View</a>`;
+    }
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td class="px-2 py-1">${j.id}</td>`+
+                   `<td class="px-2 py-1">${j.user_id}</td>`+
+                   `<td class="px-2 py-1">${j.prompt}</td>`+
+                   `<td class="px-2 py-1">${j.status}</td>`+
+                   `<td class="px-2 py-1">${j.submitted_at}</td>`+
+                   `<td class="px-2 py-1">${videoLinks}</td>`;
+    jobsBody.appendChild(tr);
+  });
+
+  const usersRes = await fetch('/admin/list_users');
+  const users = await usersRes.json();
+  const usersBody = document.getElementById('admin-users-body');
+  usersBody.innerHTML = '';
+  users.forEach(u => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td class="px-2 py-1">${u.user_id}</td>`+
+                   `<td class="px-2 py-1">${u.role}</td>`+
+                   `<td class="px-2 py-1">${u.gpu_minutes_quota}</td>`;
+    usersBody.appendChild(tr);
+  });
+}
+
+document.addEventListener('DOMContentLoaded', loadAdmin);
+</script>
+{% endblock %}
