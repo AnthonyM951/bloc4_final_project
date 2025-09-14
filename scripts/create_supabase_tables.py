@@ -18,7 +18,7 @@ import psycopg2
 
 CREATE_PROFILES = """
 create table if not exists profiles (
-    id uuid references auth.users primary key,
+    user_id uuid primary key references auth.users(id),
     username text,
     email text unique not null,
     password_hash text not null,

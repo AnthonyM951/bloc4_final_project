@@ -67,32 +67,70 @@ def test_register_validations():
     data = resp.get_json()
     assert "Weak password" in data["error"]
 
+    # Invalid username after sanitization
+    resp = client.post("/register", json={"username": "!!!", "email": "a@b.com", "password": "Password1"})
+    assert resp.status_code == 400
+    data = resp.get_json()
+    assert "Invalid username" in data["error"]
+
 
 def test_register_success(monkeypatch):
     client = app.test_client()
 
     class DummyCursor:
+        def __init__(self):
+            self.executed = None
+
         def __enter__(self):
             return self
 
         def __exit__(self, exc_type, exc, tb):
             pass
 
-        def execute(self, *args, **kwargs):
-            pass
+        def execute(self, sql, params):
+            self.executed = (sql, params)
 
     class DummyConn:
+        def __init__(self):
+            self.cursor_obj = DummyCursor()
+
         def cursor(self):
-            return DummyCursor()
+            return self.cursor_obj
 
         def commit(self):
             pass
 
-    monkeypatch.setattr(app_module, "conn", DummyConn())
+        def rollback(self):
+            pass
+
+    class DummyAuth:
+        def __init__(self):
+            self.params = None
+
+        def sign_up(self, params):
+            self.params = params
+            return type("Res", (), {"user": type("U", (), {"id": "12345678"})()})()
+
+    dummy_conn = DummyConn()
+    dummy_supabase = type("Supa", (), {"auth": DummyAuth()})()
+    monkeypatch.setattr(app_module, "conn", dummy_conn)
+    monkeypatch.setattr(app_module, "supabase", dummy_supabase)
+
     resp = client.post(
         "/register",
         json={"username": "User!@", "email": "user@example.com", "password": "Password1"},
     )
+
     assert resp.status_code == 201
     data = resp.get_json()
+    assert data["user_id"] == "12345678"
     assert data["username"] == "User"
+
+    sql, params = dummy_conn.cursor_obj.executed
+    assert "INSERT INTO profiles" in sql
+    assert params == ("12345678", "user", 120)  # role et quota par défaut
+
+    assert dummy_supabase.auth.params == {
+        "email": "user@example.com",
+        "password": "Password1",
+    }
