@@ -3,52 +3,21 @@
 <head>
   <meta charset="UTF-8" />
   <title>{% block title %}{% endblock %}</title>
-  <style>
-    body {
-      margin: 0;
-      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-      background: radial-gradient(circle at top left, #0f0c29, #302b63, #24243e);
-      color: #fff;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      height: 100vh;
-    }
-    .container {
-      text-align: center;
-    }
-    h1 {
-      margin-bottom: 2rem;
-      text-shadow: 0 0 10px #00e6e6;
-    }
-    .btn {
-      padding: 1rem 2rem;
-      margin: 0 1rem;
-      border: none;
-      border-radius: 4px;
-      font-size: 1rem;
-      cursor: pointer;
-      color: #fff;
-      background: linear-gradient(45deg, #00e6e6, #0073e6);
-      box-shadow: 0 0 15px #00e6e6;
-      transition: transform 0.2s;
-    }
-    .btn:hover {
-      transform: scale(1.05);
-    }
-    .input {
-      padding: 0.8rem 1rem;
-      margin: 0.5rem 0;
-      border: none;
-      border-radius: 4px;
-      width: 100%;
-      max-width: 300px;
-    }
-  </style>
+  <script src="https://cdn.tailwindcss.com"></script>
 </head>
-<body>
-  <div class="container">
+<body class="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-black text-slate-100">
+  <nav class="bg-slate-900/80 backdrop-blur sticky top-0">
+    <div class="max-w-6xl mx-auto flex items-center justify-between p-4">
+      <a href="/" class="text-xl font-semibold tracking-wide">AI Video</a>
+      <div class="space-x-4 text-sm">
+        <a href="/generate" class="hover:text-teal-300">Generate</a>
+        <a href="/login" class="hover:text-teal-300">Login</a>
+        <a href="/register" class="hover:text-teal-300">Register</a>
+      </div>
+    </div>
+  </nav>
+  <main class="max-w-6xl mx-auto p-6">
     {% block content %}{% endblock %}
-  </div>
+  </main>
 </body>
 </html>

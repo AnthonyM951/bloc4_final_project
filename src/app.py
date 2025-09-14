@@ -156,6 +156,12 @@ def register():
     return render_template("register.html")
 
 
+@app.get("/generate")
+def generate_page():
+    """Page de génération vidéo"""
+    return render_template("generate.html")
+
+
 @app.post("/generate")
 def generate_video():
     """Simule la génération vidéo IA"""
