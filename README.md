@@ -14,6 +14,17 @@ pytest
 flask run
 ```
 
+### Worker Celery
+
+Un worker Celery gère la génération vidéo via [fal.ai](https://fal.ai).
+Pour l'activer, installez Redis ou configurez une URL de broker, puis
+lancez le worker :
+
+```bash
+export FAL_KEY="votre_cle_api"
+celery -A worker.celery worker --loglevel=info
+```
+
 ## Intégration Supabase
 
 L'application peut s'appuyer sur [Supabase](https://supabase.com) pour la
