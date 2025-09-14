@@ -47,6 +47,8 @@ def process_video_job(job_id: int) -> None:
         return
 
     try:
+        # Clear any previous failed transaction
+        conn.rollback()
         # Récupère le prompt et les paramètres (ex: image_url) du job
         with conn.cursor() as cur:
             cur.execute(
