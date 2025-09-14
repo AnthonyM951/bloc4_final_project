@@ -5,9 +5,12 @@
   <h1 class="text-5xl font-bold mb-6 tracking-tight">Veo 3 Fast [Image to Video]</h1>
   <p class="mb-8 text-lg text-slate-300">Generate videos from your image prompts using Veo 3 fast.</p>
   <div class="space-x-4">
+    {% if session.get('user_id') %}
     <a href="/generate" class="px-6 py-3 rounded-md bg-teal-500 hover:bg-teal-400 text-slate-900 font-semibold">Essayer</a>
+    {% else %}
     <a href="/login" class="px-6 py-3 rounded-md border border-teal-500 text-teal-400 hover:bg-teal-500/10">Connexion</a>
     <a href="/register" class="px-6 py-3 rounded-md border border-teal-500 text-teal-400 hover:bg-teal-500/10">Créer un compte</a>
+    {% endif %}
   </div>
 </section>
 {% endblock %}

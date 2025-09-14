@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 
 from celery import Celery
@@ -46,24 +47,40 @@ def process_video_job(job_id: int) -> None:
         return
 
     try:
-        # Récupère le prompt du job
-        with conn.cursor() as cur:
-            cur.execute("SELECT prompt FROM jobs WHERE id = %s", (job_id,))
-            row = cur.fetchone()
-        prompt = row[0] if row else ""
-
-        # Passe le job en cours d'exécution
+        # Récupère le prompt et les paramètres (ex: image_url) du job
         with conn.cursor() as cur:
             cur.execute(
-                "UPDATE jobs SET status = %s, started_at = now() WHERE id = %s",
-                ("running", job_id),
+                "SELECT prompt, params FROM jobs WHERE id = %s", (job_id,)
+            )
+            row = cur.fetchone()
+        prompt = row[0] if row else ""
+        raw_params = row[1] if row and len(row) > 1 else "{}"
+        try:
+            params = json.loads(raw_params) if raw_params else {}
+        except Exception:
+            params = {}
+        image_url = params.get("image_url")
+
+        # Soumet le job à fal.ai pour récupérer un request_id
+        arguments = {"prompt": prompt}
+        if image_url:
+            arguments["image_url"] = image_url
+        handle = fal_client.submit(
+            "fal-ai/minimax-video/image-to-video", arguments=arguments
+        )
+        request_id = getattr(handle, "request_id", None)
+
+        # Passe le job en cours d'exécution et enregistre l'ID externe
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE jobs SET status = %s, started_at = now(), external_id = %s WHERE id = %s",
+                ("running", request_id, job_id),
             )
             conn.commit()
 
-        # Appel à fal.ai (bloquant jusqu'à ce que le rendu soit prêt)
-        response = fal_client.subscribe(
-            "fal-ai/flux/dev",
-            arguments={"prompt": prompt},
+        # Attente bloquante du résultat du job
+        response = fal_client.result(
+            "fal-ai/minimax-video/image-to-video", request_id
         )
 
         # Récupère l'URL du rendu pour l'enregistrer dans la table files

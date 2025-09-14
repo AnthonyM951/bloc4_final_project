@@ -35,6 +35,24 @@ def test_generate_video():
     assert data["prompt"] == "test"
 
 
+def test_generate_requires_login():
+    client = app.test_client()
+    resp = client.get("/generate")
+    assert resp.status_code == 302
+    assert "/login" in resp.headers["Location"]
+
+
+def test_generate_page_has_image_field():
+    client = app.test_client()
+    with client.session_transaction() as sess:
+        sess["user_id"] = "u1"
+
+    resp = client.get("/generate")
+    assert resp.status_code == 200
+    page = resp.data.decode("utf-8")
+    assert 'id="image-url"' in page
+
+
 def test_login_page():
     client = app.test_client()
     resp = client.get("/login")

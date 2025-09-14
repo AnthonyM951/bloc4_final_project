@@ -2,7 +2,15 @@ import json
 import os
 import re
 import psycopg2
-from flask import Flask, jsonify, render_template, request
+from flask import (
+    Flask,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    session,
+    url_for,
+)
 from dotenv import load_dotenv
 from supabase import Client, create_client
 try:
@@ -13,6 +21,7 @@ except Exception:  # pragma: no cover
 load_dotenv()
 
 app = Flask(__name__)
+app.secret_key = os.getenv("FLASK_SECRET_KEY", "dev-secret")
 
 # Regex pour validation email et mot de passe
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -79,7 +88,10 @@ def login():
             if not user:
                 return jsonify({"error": "Invalid credentials"}), 401
 
-            # Récupérer profil depuis Postgres
+            session["user_id"] = user.id
+            session["email"] = email
+
+            profile_payload = {"user_id": user.id, "email": email}
             if conn:
                 with conn.cursor() as cur:
                     cur.execute(
@@ -88,15 +100,13 @@ def login():
                     )
                     row = cur.fetchone()
                     if row:
-                        return jsonify(
-                            {
-                                "user_id": user.id,
-                                "email": email,
-                                "role": row[0],
-                                "gpu_minutes_quota": row[1],
-                            }
-                        ), 200
-            return jsonify({"user_id": user.id, "email": email}), 200
+                        profile_payload.update(
+                            {"role": row[0], "gpu_minutes_quota": row[1]}
+                        )
+
+            if request.is_json:
+                return jsonify(profile_payload), 200
+            return redirect(url_for("generate_page"))
 
         except Exception as e:
             return jsonify({"error": str(e)}), 400
@@ -159,7 +169,9 @@ def register():
 @app.get("/generate")
 def generate_page():
     """Page de génération vidéo"""
-    return render_template("generate.html")
+    if not session.get("user_id"):
+        return redirect(url_for("login"))
+    return render_template("generate.html", user_id=session["user_id"])
 
 
 @app.post("/generate")

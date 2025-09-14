@@ -10,9 +10,12 @@
     <div class="max-w-6xl mx-auto flex items-center justify-between p-4">
       <a href="/" class="text-xl font-semibold tracking-wide">AI Video</a>
       <div class="space-x-4 text-sm">
+        {% if session.get('user_id') %}
         <a href="/generate" class="hover:text-teal-300">Generate</a>
+        {% else %}
         <a href="/login" class="hover:text-teal-300">Login</a>
         <a href="/register" class="hover:text-teal-300">Register</a>
+        {% endif %}
       </div>
     </div>
   </nav>
