@@ -152,3 +152,17 @@ def test_register_success(monkeypatch):
         "email": "user@example.com",
         "password": "Password1",
     }
+
+
+def test_logout_clears_session():
+    client = app.test_client()
+    with client.session_transaction() as sess:
+        sess["user_id"] = "u1"
+        sess["role"] = "user"
+
+    resp = client.get("/logout")
+    assert resp.status_code == 302
+    assert "/login" in resp.headers["Location"]
+
+    with client.session_transaction() as sess:
+        assert not sess

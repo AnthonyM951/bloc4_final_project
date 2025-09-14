@@ -120,6 +120,13 @@ def login():
     return render_template("login.html")
 
 
+@app.get("/logout")
+def logout():
+    """Déconnexion utilisateur"""
+    session.clear()
+    return redirect(url_for("login"))
+
+
 @app.route("/register", methods=["GET", "POST"])
 def register():
     """Inscription utilisateur"""
@@ -351,63 +358,6 @@ def admin_list_users():
     except Exception as e:
         if conn:
             conn.rollback()
-        return jsonify({"error": str(e)}), 400
-
-
-@app.get("/admin/list_jobs")
-def admin_list_jobs():
-    """Lister tous les jobs (admin)"""
-    if session.get("role") != "admin":
-        return jsonify({"error": "forbidden"}), 403
-    if conn is None:
-        return jsonify({"error": "Database connection not available"}), 500
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT j.id, j.user_id, j.prompt, j.status, j.submitted_at, f.url
-                FROM jobs j
-                LEFT JOIN videos v ON v.job_id = j.id
-                LEFT JOIN files f ON f.id = v.file_id
-                ORDER BY j.submitted_at DESC
-                """
-            )
-            rows = cur.fetchall()
-        jobs = [
-            {
-                "id": r[0],
-                "user_id": r[1],
-                "prompt": r[2],
-                "status": r[3],
-                "submitted_at": r[4].isoformat(),
-                "video_url": r[5],
-            }
-            for r in rows
-        ]
-        return jsonify(jobs)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 400
-
-
-@app.get("/admin/list_users")
-def admin_list_users():
-    """Lister les utilisateurs"""
-    if session.get("role") != "admin":
-        return jsonify({"error": "forbidden"}), 403
-    if conn is None:
-        return jsonify({"error": "Database connection not available"}), 500
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT user_id, role, gpu_minutes_quota FROM profiles ORDER BY user_id"
-            )
-            rows = cur.fetchall()
-        users = [
-            {"user_id": r[0], "role": r[1], "gpu_minutes_quota": r[2]}
-            for r in rows
-        ]
-        return jsonify(users)
-    except Exception as e:
         return jsonify({"error": str(e)}), 400
 
 
