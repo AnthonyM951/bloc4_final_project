@@ -5,6 +5,10 @@ import psycopg2
 from flask import Flask, jsonify, render_template, request
 from dotenv import load_dotenv
 from supabase import Client, create_client
+try:
+    from worker import process_video_job  # type: ignore
+except Exception:  # pragma: no cover
+    process_video_job = None
 
 load_dotenv()
 
@@ -183,9 +187,18 @@ def submit_job():
             )
             job = cur.fetchone()
             conn.commit()
+        job_id = job[0]
+
+        # Déclenche le worker Celery si disponible
+        if process_video_job is not None:
+            try:
+                process_video_job.delay(job_id)
+            except Exception:
+                pass
+
         return (
             jsonify(
-                {"id": job[0], "status": job[1], "submitted_at": job[2].isoformat()}
+                {"id": job_id, "status": job[1], "submitted_at": job[2].isoformat()}
             ),
             201,
         )
