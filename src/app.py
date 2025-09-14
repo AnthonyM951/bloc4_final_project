@@ -1,14 +1,25 @@
 import json
 import os
+import re
 
 import psycopg2
 from flask import Flask, jsonify, render_template, request
 from dotenv import load_dotenv
+from supabase import Client, create_client
 
 load_dotenv()
 
 
 app = Flask(__name__)
+
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+PASSWORD_RE = re.compile(r"^(?=.*[A-Z])(?=.*\d).{8,}$")
+
+
+def sanitize_text(text: str) -> str:
+    """Remove characters that are not alphanumeric, dash or underscore."""
+    return re.sub(r"[^a-zA-Z0-9_-]", "", text)
+
 
 # 🔑 Connexion Postgres (infos depuis Dashboard Supabase -> Database -> Connection info)
 try:
@@ -23,6 +34,16 @@ try:
 except Exception:
     # Permet aux tests de s'exécuter sans base disponible
     conn = None
+
+# Client Supabase pour l'authentification
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+supabase: Client | None = None
+if SUPABASE_URL and SUPABASE_KEY:
+    try:
+        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+    except Exception:
+        supabase = None
 
 
 @app.get("/")
@@ -49,7 +70,42 @@ def login():
 def register():
     """Page de création de compte."""
     if request.method == "POST":
-        return "Registration submitted", 200
+        data = request.get_json(silent=True) or request.form
+        username = data.get("username", "")
+        email = data.get("email", "")
+        password = data.get("password", "")
+
+        if not EMAIL_RE.match(email):
+            return jsonify({"error": "Invalid email"}), 400
+        if not PASSWORD_RE.match(password):
+            return jsonify({"error": "Weak password"}), 400
+
+        clean_username = sanitize_text(username)
+        if not clean_username:
+            return jsonify({"error": "Invalid username"}), 400
+
+        if supabase is None:
+            return jsonify({"error": "Supabase client not available"}), 500
+        if conn is None:
+            return jsonify({"error": "Database connection not available"}), 500
+
+        try:
+            auth_resp = supabase.auth.sign_up({"email": email, "password": password})
+            user = getattr(auth_resp, "user", None)
+            if not user or not getattr(user, "id", None):
+                raise ValueError("Supabase signup failed")
+            user_id = user.id
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO profiles (user_id, username) VALUES (%s, %s)",
+                    (user_id, clean_username),
+                )
+                conn.commit()
+            return jsonify({"user_id": user_id, "username": clean_username}), 201
+        except Exception as e:
+            conn.rollback()
+            return jsonify({"error": str(e)}), 400
     return render_template("register.html")
 
 
