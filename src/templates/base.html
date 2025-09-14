@@ -11,7 +11,10 @@
       <a href="/" class="text-xl font-semibold tracking-wide">AI Video</a>
       <div class="space-x-4 text-sm">
         {% if session.get('user_id') %}
-        <a href="/generate" class="hover:text-teal-300">Generate</a>
+        <a href="/dashboard" class="hover:text-teal-300">Dashboard</a>
+        {% if session.get('role') == 'admin' %}
+        <a href="/admin" class="hover:text-teal-300">Admin</a>
+        {% endif %}
         {% else %}
         <a href="/login" class="hover:text-teal-300">Login</a>
         <a href="/register" class="hover:text-teal-300">Register</a>
