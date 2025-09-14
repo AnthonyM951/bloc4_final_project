@@ -20,6 +20,8 @@ CREATE_PROFILES = """
 create table if not exists profiles (
     user_id uuid primary key references auth.users(id),
     username text,
+    email text unique not null,
+    password_hash text not null,
     created_at timestamp with time zone default now()
 );
 """

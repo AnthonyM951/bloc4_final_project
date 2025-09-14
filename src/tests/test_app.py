@@ -128,7 +128,8 @@ def test_register_success(monkeypatch):
 
     sql, params = dummy_conn.cursor_obj.executed
     assert "INSERT INTO profiles" in sql
-    assert params == ("12345678", "User")
+    assert params == ("12345678", "user", 120)  # role et quota par défaut
+
     assert dummy_supabase.auth.params == {
         "email": "user@example.com",
         "password": "Password1",
