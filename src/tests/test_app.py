@@ -183,3 +183,30 @@ def test_logout_clears_session():
 
     with client.session_transaction() as sess:
         assert not sess
+
+
+def test_wiki_summary(monkeypatch):
+    client = app.test_client()
+
+    def fake_extract(text):
+        return ["python", "language"]
+
+    def fake_search(keywords):
+        return {k: ["http://example.com"] for k in keywords}
+
+    def fake_scrape(url):
+        return "Python is a programming language."  # pragma: no cover
+
+    def fake_summary(text):
+        return "summary"  # pragma: no cover
+
+    monkeypatch.setattr(app_module, "extract_keywords", fake_extract)
+    monkeypatch.setattr(app_module, "wikipedia_search", fake_search)
+    monkeypatch.setattr(app_module, "scrape_and_clean", fake_scrape)
+    monkeypatch.setattr(app_module, "summarize_text", fake_summary)
+
+    resp = client.post("/wiki_summary", json={"query": "Python language"})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["keywords"] == ["python", "language"]
+    assert data["summary"] == "summary"
