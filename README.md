@@ -40,8 +40,8 @@ gestion des utilisateurs. Pour l'activer :
    export SUPABASE_DB_URL="postgresql://..."  # clé service role
    ```
 
-3. Initialisez la table `profiles` utilisée par le formulaire
-   d'inscription :
+3. Initialisez les tables auxiliaires (`profiles`, `files`, `kpi_spark_daily`)
+   utilisées par l'application et le dashboard :
 
    ```bash
    python scripts/create_supabase_tables.py
@@ -49,3 +49,33 @@ gestion des utilisateurs. Pour l'activer :
 
 4. Lancez l'application (`flask run`) puis rendez-vous sur `/register`
    pour créer un compte qui sera stocké dans Supabase.
+
+## Pipeline Spark (KPIs distribués)
+
+Un job Spark calcule les indicateurs de performance utilisés dans le
+tableau de bord administrateur. Le script `src/pipelines/spark_kpis.py`
+se lance en batch via `spark-submit` et lit la table `jobs` en JDBC.
+
+```bash
+pip install -r requirements.txt  # inclut pyspark
+export SUPABASE_DB_USER="postgres"
+export SUPABASE_DB_PASSWORD="***"
+export SUPABASE_DB_HOST="db.supabase.co"
+export SUPABASE_DB_NAME="postgres"
+spark-submit src/pipelines/spark_kpis.py
+```
+
+Par défaut les agrégations quotidiennes (totaux, réussites/échecs,
+utilisateurs actifs, durées moyenne/médiane, taux de réussite) sont
+écrites dans la table PostgreSQL `kpi_spark_daily` consommée par
+`/admin/kpis`. Il est possible de stocker le résultat dans un bucket
+S3/MinIO en définissant `SPARK_KPI_OUTPUT_PATH`.
+
+Pour vérifier les données mises à disposition du dashboard :
+
+```sql
+select *
+from kpi_spark_daily
+order by job_date desc
+limit 10;
+```

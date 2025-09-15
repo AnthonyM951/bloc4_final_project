@@ -25,17 +25,24 @@
   <section>
     <h2 class="text-xl font-semibold mb-2">KPIs quotidiens</h2>
     <canvas id="kpi-chart" class="w-full h-64"></canvas>
-    <table class="min-w-full text-sm mt-4">
-      <thead>
-        <tr class="text-left">
-          <th class="px-2 py-1">Jour</th>
-          <th class="px-2 py-1">Jobs</th>
-          <th class="px-2 py-1">GPU min</th>
-          <th class="px-2 py-1">Coût (cents)</th>
-        </tr>
-      </thead>
-      <tbody id="kpi-body"></tbody>
-    </table>
+    <div class="overflow-x-auto">
+      <table class="min-w-full text-sm mt-4">
+        <thead>
+          <tr class="text-left">
+            <th class="px-2 py-1">Jour</th>
+            <th class="px-2 py-1">Jobs totaux</th>
+            <th class="px-2 py-1">Réussis</th>
+            <th class="px-2 py-1">Échecs</th>
+            <th class="px-2 py-1">Utilisateurs actifs</th>
+            <th class="px-2 py-1">Durée moyenne (s)</th>
+            <th class="px-2 py-1">Durée médiane (s)</th>
+            <th class="px-2 py-1">Taux de réussite (%)</th>
+            <th class="px-2 py-1">Mise à jour</th>
+          </tr>
+        </thead>
+        <tbody id="kpi-body"></tbody>
+      </table>
+    </div>
   </section>
   <section>
     <h2 class="text-xl font-semibold mb-2">Users</h2>
@@ -53,6 +60,8 @@
 </div>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script>
+let kpiChart;
+
 async function loadAdmin() {
   const jobsRes = await fetch('/admin/list_jobs');
   const jobs = await jobsRes.json();
@@ -90,34 +99,89 @@ async function loadAdmin() {
   const kpis = await kpiRes.json();
   const kpiBody = document.getElementById('kpi-body');
   kpiBody.innerHTML = '';
-  const labels = [];
-  const jobsData = [];
-  const gpuData = [];
-  const costData = [];
-  kpis.reverse().forEach(k => {
-    labels.push(k.day);
-    jobsData.push(k.jobs);
-    gpuData.push(k.gpu_minutes);
-    costData.push(k.cost_cents);
+
+  if (!Array.isArray(kpis)) {
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td class="px-2 py-1">${k.day}</td>`+
-                   `<td class="px-2 py-1">${k.jobs}</td>`+
-                   `<td class="px-2 py-1">${k.gpu_minutes}</td>`+
-                   `<td class="px-2 py-1">${k.cost_cents}</td>`;
+    tr.innerHTML = `<td class="px-2 py-1" colspan="9">${kpis.error || 'Impossible de charger les KPIs.'}</td>`;
     kpiBody.appendChild(tr);
-  });
-  const ctx = document.getElementById('kpi-chart');
-  new Chart(ctx, {
-    type: 'line',
-    data: {
-      labels: labels,
-      datasets: [
-        { label: 'Jobs', data: jobsData, borderColor: 'teal', tension: 0.3 },
-        { label: 'GPU min', data: gpuData, borderColor: 'orange', tension: 0.3 },
-        { label: 'Coût (cents)', data: costData, borderColor: 'purple', tension: 0.3 }
-      ]
+  } else if (kpis.length === 0) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td class="px-2 py-1" colspan="9">Aucune donnée KPI disponible.</td>';
+    kpiBody.appendChild(tr);
+  } else {
+    const labels = [];
+    const totalData = [];
+    const successData = [];
+    const failedData = [];
+    const successRateData = [];
+    const ordered = [...kpis].reverse();
+
+    ordered.forEach(k => {
+      const total = Number(k.jobs_total ?? 0);
+      const succeeded = Number(k.jobs_succeeded ?? 0);
+      const failed = Number(k.jobs_failed ?? 0);
+      const activeUsers = Number(k.active_users ?? 0);
+      const avgValue = Number(k.avg_duration_seconds);
+      const avgDuration = Number.isFinite(avgValue) ? avgValue.toFixed(1) : '—';
+      const medianValue = Number(k.p50_duration_seconds);
+      const medianDuration = Number.isFinite(medianValue) ? medianValue.toFixed(1) : '—';
+      const successRatioRaw = k.success_rate;
+      const successRatio = successRatioRaw != null ? Number(successRatioRaw) : null;
+      const successPct = successRatio != null && !Number.isNaN(successRatio) ? successRatio * 100 : null;
+      const successDisplay = successPct != null ? successPct.toFixed(1) : '—';
+      const updated = k.updated_at ? new Date(k.updated_at).toLocaleString() : '—';
+
+      labels.push(k.day ?? '');
+      totalData.push(total);
+      successData.push(succeeded);
+      failedData.push(failed);
+      successRateData.push(successPct != null ? Number(successPct.toFixed(1)) : null);
+
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td class="px-2 py-1">${k.day ?? ''}</td>`+
+                     `<td class="px-2 py-1">${total}</td>`+
+                     `<td class="px-2 py-1">${succeeded}</td>`+
+                     `<td class="px-2 py-1">${failed}</td>`+
+                     `<td class="px-2 py-1">${activeUsers}</td>`+
+                     `<td class="px-2 py-1">${avgDuration}</td>`+
+                     `<td class="px-2 py-1">${medianDuration}</td>`+
+                     `<td class="px-2 py-1">${successDisplay !== '—' ? successDisplay + '%' : '—'}</td>`+
+                     `<td class="px-2 py-1">${updated}</td>`;
+      kpiBody.appendChild(tr);
+    });
+
+    const ctx = document.getElementById('kpi-chart');
+    if (kpiChart) {
+      kpiChart.destroy();
     }
-  });
+    kpiChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: labels,
+        datasets: [
+          { label: 'Jobs totaux', data: totalData, borderColor: 'teal', tension: 0.3, yAxisID: 'y' },
+          { label: 'Jobs réussis', data: successData, borderColor: 'rgb(56,189,248)', tension: 0.3, yAxisID: 'y' },
+          { label: 'Jobs échoués', data: failedData, borderColor: 'rgb(248,113,113)', tension: 0.3, yAxisID: 'y' },
+          { label: 'Taux de réussite (%)', data: successRateData, borderColor: 'orange', borderDash: [5, 5], tension: 0.3, yAxisID: 'y1' }
+        ]
+      },
+      options: {
+        scales: {
+          y: {
+            beginAtZero: true,
+            title: { display: true, text: 'Jobs' }
+          },
+          y1: {
+            beginAtZero: true,
+            position: 'right',
+            suggestedMax: 100,
+            title: { display: true, text: 'Taux (%)' },
+            grid: { drawOnChartArea: false }
+          }
+        }
+      }
+    });
+  }
 }
 
 document.addEventListener('DOMContentLoaded', loadAdmin);
