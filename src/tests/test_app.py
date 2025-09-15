@@ -2,7 +2,7 @@ import os
 import sys
 
 # Ajoute le répertoire parent au PYTHONPATH pour import local
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import app as app_module
 from app import app  # type: ignore
@@ -60,6 +60,23 @@ def test_login_page():
     page = resp.data.decode("utf-8")
     assert "Connexion" in page
     assert "<form" in page
+
+
+def test_login_fallback(monkeypatch):
+    client = app.test_client()
+    # Ensure Supabase and DB connections are not used
+    monkeypatch.setattr(app_module, "supabase", None)
+    monkeypatch.setattr(app_module, "conn", None)
+
+    resp = client.post(
+        "/login",
+        json={"user_id": "u1", "email": "user@example.com"},
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["user_id"] == "u1"
+    with client.session_transaction() as sess:
+        assert sess["user_id"] == "u1"
 
 
 def test_register_page():
