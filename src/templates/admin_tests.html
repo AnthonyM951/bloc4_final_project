@@ -25,9 +25,71 @@
   </section>
   <section>
     <h2 class="text-xl font-semibold mb-2">Résultats des tests</h2>
-    <pre class="bg-slate-800 p-4 rounded text-sm overflow-x-auto">{{ output }}</pre>
+    <p class="text-xs text-slate-400 mb-3">
+      Les tests sont exécutés par GitHub Actions. Cette page affiche le dernier
+      résultat connu.
+    </p>
+    {% if ci_run.get('error') %}
+    <div class="bg-red-900/40 border border-red-700/60 rounded p-4 text-sm">
+      <p class="text-red-200">{{ ci_run.get('error') }}</p>
+    </div>
+    {% else %}
+    <div class="bg-slate-800 p-4 rounded text-sm space-y-2">
+      <p>
+        <span class="font-semibold text-slate-200">Workflow :</span>
+        {{ ci_run.get('name') }}
+      </p>
+      <p>
+        <span class="font-semibold text-slate-200">Dépôt :</span>
+        {{ ci_run.get('repository') }}
+      </p>
+      <p>
+        <span class="font-semibold text-slate-200">Évènement :</span>
+        {{ ci_run.get('event') or '—' }}
+      </p>
+      <p>
+        <span class="font-semibold text-slate-200">Branche :</span>
+        {{ ci_run.get('head_branch') or '—' }}
+      </p>
+      <p>
+        <span class="font-semibold text-slate-200">Statut :</span>
+        {% set conclusion = ci_run.get('conclusion') or ci_run.get('status') %}
+        <span
+          class="font-semibold {% if success %}text-emerald-400{% elif conclusion in ['failure', 'cancelled'] %}text-red-400{% else %}text-amber-300{% endif %}"
+        >
+          {{ conclusion or 'Inconnu' }}
+        </span>
+      </p>
+      {% if ci_run.get('commit_message') %}
+      <p>
+        <span class="font-semibold text-slate-200">Commit :</span>
+        {{ ci_run.get('commit_message') }}
+      </p>
+      {% endif %}
+      {% if ci_run.get('updated_at') %}
+      <p>
+        <span class="font-semibold text-slate-200">Mise à jour :</span>
+        {{ ci_run.get('updated_at') }}
+      </p>
+      {% endif %}
+      {% if ci_run.get('html_url') %}
+      <p>
+        <a
+          href="{{ ci_run.get('html_url') }}"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="text-indigo-300 underline hover:text-indigo-200"
+        >
+          Voir les détails sur GitHub
+        </a>
+      </p>
+      {% endif %}
+    </div>
     {% if not success %}
-    <p class="text-red-400 mt-2">Certains tests ont échoué.</p>
+    <p class="text-red-400 mt-2">
+      Le dernier workflow n'a pas abouti avec succès.
+    </p>
+    {% endif %}
     {% endif %}
   </section>
 </div>

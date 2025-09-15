@@ -1,8 +1,6 @@
 import json
 import os
 import re
-import subprocess
-import sys
 from functools import wraps
 from time import time
 
@@ -405,6 +403,85 @@ def admin_dashboard():
     return render_template("admin_dashboard.html")
 
 
+def fetch_latest_ci_status() -> tuple[dict[str, str | None], bool]:
+    """Retourne le statut du dernier run GitHub Actions configuré."""
+
+    repo = os.getenv("GITHUB_REPO")
+    workflow = os.getenv("GITHUB_WORKFLOW")
+    branch = os.getenv("GITHUB_WORKFLOW_BRANCH")
+    token = os.getenv("GITHUB_TOKEN")
+
+    if not repo or not workflow:
+        return (
+            {
+                "error": (
+                    "GitHub Actions n'est pas configuré. Définissez "
+                    "GITHUB_REPO et GITHUB_WORKFLOW."
+                )
+            },
+            False,
+        )
+
+    url = f"https://api.github.com/repos/{repo}/actions/workflows/{workflow}/runs"
+    params: dict[str, str | int] = {"per_page": 1}
+    if branch:
+        params["branch"] = branch
+
+    headers = {"Accept": "application/vnd.github+json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    try:
+        resp = requests.get(url, headers=headers, params=params, timeout=10)
+    except Exception as exc:  # pragma: no cover - dépend du réseau
+        return ({"error": f"Impossible de contacter GitHub: {exc}"}, False)
+
+    if resp.status_code != 200:
+        try:
+            detail = resp.json().get("message", "")
+        except Exception:  # pragma: no cover - payload inattendu
+            detail = resp.text
+        message = detail or "Réponse inattendue de l'API GitHub."
+        return (
+            {
+                "error": (
+                    f"GitHub API a renvoyé {resp.status_code}: {message.strip()}"
+                )
+            },
+            False,
+        )
+
+    try:
+        payload = resp.json()
+    except Exception:  # pragma: no cover - payload inattendu
+        return ({"error": "Réponse JSON invalide depuis GitHub."}, False)
+
+    runs = payload.get("workflow_runs", [])
+    if not runs:
+        return ({"error": "Aucune exécution trouvée pour ce workflow."}, False)
+
+    run = runs[0]
+    info = {
+        "name": run.get("name") or run.get("display_title") or workflow,
+        "status": run.get("status"),
+        "conclusion": run.get("conclusion"),
+        "html_url": run.get("html_url"),
+        "updated_at": run.get("updated_at"),
+        "created_at": run.get("created_at"),
+        "run_started_at": run.get("run_started_at"),
+        "head_branch": run.get("head_branch"),
+        "head_sha": run.get("head_sha"),
+        "event": run.get("event"),
+        "actor": run.get("actor", {}).get("login") if run.get("actor") else None,
+        "commit_message": run.get("head_commit", {}).get("message"),
+        "repository": repo,
+    }
+
+    success = (run.get("conclusion") or "").lower() == "success"
+
+    return info, success
+
+
 @app.get("/admin/tests")
 @require_admin
 def admin_tests_page():
@@ -431,20 +508,14 @@ def admin_tests_page():
             "expected": "Accès interdit si rôle ≠ admin",
         },
     ]
-    try:
-        proc = subprocess.run(
-            [sys.executable, "-m", "pytest", "-q"],
-            capture_output=True,
-            text=True,
-            cwd=os.path.dirname(os.path.abspath(__file__)),
-        )
-        output = proc.stdout
-        success = proc.returncode == 0
-    except Exception as e:
-        output = str(e)
-        success = False
+
+    ci_run, success = fetch_latest_ci_status()
+
     return render_template(
-        "admin_tests.html", scenarios=scenarios, output=output, success=success
+        "admin_tests.html",
+        scenarios=scenarios,
+        ci_run=ci_run,
+        success=success,
     )
 
 
