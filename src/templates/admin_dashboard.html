@@ -3,6 +3,9 @@
 {% block content %}
 <div class="space-y-8">
   <h1 class="text-3xl font-semibold text-center">Admin Dashboard</h1>
+  <div class="text-right">
+    <button id="refresh-admin" class="px-4 py-2 rounded bg-teal-500 hover:bg-teal-400 text-slate-900 font-semibold">Refresh Data</button>
+  </div>
   <section>
     <h2 class="text-xl font-semibold mb-2">Jobs</h2>
     <table class="min-w-full text-sm" id="admin-jobs-table">
@@ -58,7 +61,8 @@ async function loadAdmin() {
   jobs.forEach(j => {
     let videoLinks = '';
     if (j.video_url) {
-      videoLinks = `<a href="${j.video_url}" target="_blank" class="text-teal-400">View</a>`;
+      videoLinks = `<a href="${j.video_url}" target="_blank" class="text-teal-400">View</a>` +
+                   ` <a href="${j.video_url}" download class="text-teal-400 ml-2">Download</a>`;
     }
     const tr = document.createElement('tr');
     tr.innerHTML = `<td class="px-2 py-1">${j.id}</td>`+
@@ -117,5 +121,7 @@ async function loadAdmin() {
 }
 
 document.addEventListener('DOMContentLoaded', loadAdmin);
+
+document.getElementById('refresh-admin').addEventListener('click', loadAdmin);
 </script>
 {% endblock %}
