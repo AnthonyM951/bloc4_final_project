@@ -2,7 +2,7 @@ import os
 import sys
 
 # Ajoute le répertoire parent au PYTHONPATH pour import local
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import app as app_module
 from app import app  # type: ignore
