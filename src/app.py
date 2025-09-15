@@ -2,6 +2,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from functools import wraps
 from time import time
 
@@ -432,7 +433,7 @@ def admin_tests_page():
     ]
     try:
         proc = subprocess.run(
-            ["pytest", "-q"],
+            [sys.executable, "-m", "pytest", "-q"],
             capture_output=True,
             text=True,
             cwd=os.path.dirname(os.path.abspath(__file__)),
