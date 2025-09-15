@@ -73,9 +73,10 @@ if SUPABASE_URL and SUPABASE_KEY:
     try:
         supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
         # Vérifie la connexion en faisant une requête simple
-        supabase.table("profiles").select("id").limit(1).execute()
+        supabase.table("profiles").select("user_id").limit(1).execute()
         supabase_connected = True
-    except Exception:
+    except Exception as e:
+        print("Erreur supabase connection:", e)
         supabase = None
         supabase_connected = False
 
