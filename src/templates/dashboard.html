@@ -3,6 +3,11 @@
 {% block content %}
 <div class="max-w-3xl mx-auto space-y-8">
   <h1 class="text-3xl font-semibold text-center">Dashboard</h1>
+  {% if session.get('role') == 'admin' %}
+  <div class="text-right">
+    <a href="/admin" class="px-4 py-2 rounded bg-indigo-500 hover:bg-indigo-400 text-slate-900 font-semibold">Admin Dashboard</a>
+  </div>
+  {% endif %}
   <form id="job-form" class="space-y-4">
     <input id="prompt" class="w-full px-4 py-2 rounded bg-slate-900 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-teal-500" type="text" placeholder="Enter prompt" required />
     <input id="image-url" class="w-full px-4 py-2 rounded bg-slate-900 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-teal-500" type="text" placeholder="Image URL" required />
