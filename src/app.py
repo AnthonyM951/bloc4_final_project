@@ -149,6 +149,7 @@ def login():
                         row = cur.fetchone()
                         if row:
                             session["role"] = row[0]
+                            session["gpu_minutes_quota"] = row[1]
                             profile_payload.update(
                                 {"role": row[0], "gpu_minutes_quota": row[1]}
                             )
@@ -183,6 +184,7 @@ def login():
                     row = cur.fetchone()
                     if row:
                         session["role"] = row[0]
+                        session["gpu_minutes_quota"] = row[1]
                         profile_payload.update(
                             {"role": row[0], "gpu_minutes_quota": row[1]}
                         )
@@ -267,7 +269,9 @@ def dashboard():
     return render_template(
         "dashboard.html",
         user_id=session["user_id"],
+        email=session.get("email"),
         role=session.get("role", "user"),
+        gpu_minutes_quota=session.get("gpu_minutes_quota"),
     )
 
 
