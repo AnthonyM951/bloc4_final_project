@@ -361,5 +361,45 @@ def admin_list_users():
         return jsonify({"error": str(e)}), 400
 
 
+@app.get("/admin/kpis")
+def admin_kpis():
+    """Agrégations journalières pour le tableau de bord admin"""
+    if session.get("role") != "admin":
+        return jsonify({"error": "forbidden"}), 403
+    if conn is None:
+        return jsonify({"error": "Database connection not available"}), 500
+
+    try:
+        conn.rollback()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                select day,
+                       sum(jobs_count) as jobs,
+                       round(sum(gpu_minutes)::numeric, 2) as gpu_minutes,
+                       sum(cost_cents) as cost_cents
+                from usage_daily
+                group by day
+                order by day desc
+                limit 30
+                """
+            )
+            rows = cur.fetchall()
+        data = [
+            {
+                "day": r[0].isoformat(),
+                "jobs": int(r[1]),
+                "gpu_minutes": float(r[2]),
+                "cost_cents": int(r[3]),
+            }
+            for r in rows
+        ]
+        return jsonify(data)
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        return jsonify({"error": str(e)}), 400
+
+
 if __name__ == "__main__":
     app.run(debug=True)

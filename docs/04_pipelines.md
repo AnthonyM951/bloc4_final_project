@@ -7,5 +7,6 @@
 4. Les métadonnées sont sauvegardées dans PostgreSQL et le fichier sur S3.
 
 ## Batch avec Airflow
-- Tâche nocturne d'archivage et de nettoyage des jobs terminés.
-- Pipeline Spark pour analyser les logs : durée moyenne, erreurs, coûts GPU.
+- DAG `video_app_daily` planifié à 02h00 chaque nuit.
+- Tâche `aggregate_usage_daily` : agrège les jobs terminés et alimente la table `usage_daily` (jobs_count, gpu_minutes, cost_cents).
+- Tâche `prune_intermediate_files` : supprime du stockage les fichiers intermédiaires vieux de plusieurs jours et nettoie la table `files`.
