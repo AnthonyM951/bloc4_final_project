@@ -116,8 +116,13 @@ def test_admin_guard():
 
 def test_metrics_endpoint():
     client = app.test_client()
+    resp = client.get("/metrics", environ_base={"REMOTE_ADDR": "8.8.8.8"})
+    assert resp.status_code == 403
+
     client.get("/api")
     resp = client.get("/metrics")
     assert resp.status_code == 200
     body = resp.data.decode("utf-8")
     assert "flask_http_requests_total" in body
+    assert 'endpoint="index"' in body
+    assert 'method="GET"' in body
