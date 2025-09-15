@@ -35,6 +35,20 @@ create table if not exists files (
 );
 """
 
+CREATE_KPI_SPARK_DAILY = """
+create table if not exists kpi_spark_daily (
+    job_date date primary key,
+    jobs_total integer not null,
+    jobs_succeeded integer default 0,
+    jobs_failed integer default 0,
+    active_users integer default 0,
+    avg_duration_seconds double precision,
+    p50_duration_seconds double precision,
+    success_rate double precision,
+    updated_at timestamp with time zone default now()
+);
+"""
+
 def main() -> None:
     db_url = os.getenv("SUPABASE_DB_URL")
     if not db_url:
@@ -44,6 +58,7 @@ def main() -> None:
         with conn, conn.cursor() as cur:
             cur.execute(CREATE_PROFILES)
             cur.execute(CREATE_FILES)
+            cur.execute(CREATE_KPI_SPARK_DAILY)
     finally:
         conn.close()
 

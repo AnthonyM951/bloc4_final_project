@@ -842,26 +842,36 @@ def admin_kpis():
         with conn.cursor() as cur:
             cur.execute(
                 """
-                select day,
-                       sum(jobs_count) as jobs,
-                       round(sum(gpu_minutes)::numeric, 2) as gpu_minutes,
-                       sum(cost_cents) as cost_cents
-                from usage_daily
-                group by day
-                order by day desc
+                select job_date,
+                       jobs_total,
+                       jobs_succeeded,
+                       jobs_failed,
+                       active_users,
+                       avg_duration_seconds,
+                       p50_duration_seconds,
+                       success_rate,
+                       updated_at
+                from kpi_spark_daily
+                order by job_date desc
                 limit 30
                 """,
             )
             rows = cur.fetchall()
-        data = [
-            {
-                "day": r[0].isoformat(),
-                "jobs": int(r[1]),
-                "gpu_minutes": float(r[2]),
-                "cost_cents": int(r[3]),
-            }
-            for r in rows
-        ]
+        data = []
+        for job_date, jobs_total, jobs_succeeded, jobs_failed, active_users, avg_duration, p50_duration, success_rate, updated_at in rows:
+            data.append(
+                {
+                    "day": job_date.isoformat() if job_date else None,
+                    "jobs_total": int(jobs_total or 0),
+                    "jobs_succeeded": int(jobs_succeeded or 0),
+                    "jobs_failed": int(jobs_failed or 0),
+                    "active_users": int(active_users or 0),
+                    "avg_duration_seconds": float(avg_duration) if avg_duration is not None else None,
+                    "p50_duration_seconds": float(p50_duration) if p50_duration is not None else None,
+                    "success_rate": float(success_rate) if success_rate is not None else None,
+                    "updated_at": updated_at.isoformat() if updated_at else None,
+                }
+            )
         return jsonify(data)
     except Exception as e:
         if conn:
