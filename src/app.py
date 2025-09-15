@@ -568,7 +568,7 @@ def list_jobs(user_id):
             cur.execute(
                 """
                 SELECT j.id, j.prompt, j.status, j.submitted_at,
-                       COALESCE(v.source_url, f.url) as video_url
+                       f.bucket, f.path
                 FROM jobs j
                 LEFT JOIN videos v ON v.job_id = j.id
                 LEFT JOIN files f ON f.id = v.file_id
@@ -578,13 +578,16 @@ def list_jobs(user_id):
                 (user_id,),
             )
             rows = cur.fetchall()
+        base_url = (
+            f"{SUPABASE_URL}/storage/v1/object/public" if SUPABASE_URL else ""
+        )
         jobs = [
             {
                 "id": r[0],
                 "prompt": r[1],
                 "status": r[2],
                 "submitted_at": r[3].isoformat(),
-                "video_url": r[4],
+                "video_url": f"{base_url}/{r[4]}/{r[5]}" if r[4] and r[5] else None,
             }
             for r in rows
         ]
@@ -604,7 +607,7 @@ def get_videos(user_id):
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT v.id, v.title, v.source_url, f.url
+                SELECT v.id, v.title, f.bucket, f.path
                 FROM videos v
                 LEFT JOIN files f ON f.id = v.file_id
                 WHERE v.user_id = %s
@@ -613,11 +616,14 @@ def get_videos(user_id):
                 (user_id,),
             )
             rows = cur.fetchall()
+        base_url = (
+            f"{SUPABASE_URL}/storage/v1/object/public" if SUPABASE_URL else ""
+        )
         videos = [
             {
                 "id": r[0],
                 "title": r[1],
-                "url": r[3] or r[2],
+                "url": f"{base_url}/{r[2]}/{r[3]}" if r[2] and r[3] else None,
             }
             for r in rows
         ]
@@ -640,7 +646,7 @@ def admin_list_jobs():
             cur.execute(
                 """
                 SELECT j.id, j.user_id, j.prompt, j.status, j.submitted_at,
-                       COALESCE(v.source_url, f.url) as video_url
+                       f.bucket, f.path
                 FROM jobs j
                 LEFT JOIN videos v ON v.job_id = j.id
                 LEFT JOIN files f ON f.id = v.file_id
@@ -648,6 +654,9 @@ def admin_list_jobs():
                 """,
             )
             rows = cur.fetchall()
+        base_url = (
+            f"{SUPABASE_URL}/storage/v1/object/public" if SUPABASE_URL else ""
+        )
         jobs = [
             {
                 "id": r[0],
@@ -655,7 +664,7 @@ def admin_list_jobs():
                 "prompt": r[2],
                 "status": r[3],
                 "submitted_at": r[4].isoformat(),
-                "video_url": r[5],
+                "video_url": f"{base_url}/{r[5]}/{r[6]}" if r[5] and r[6] else None,
             }
             for r in rows
         ]
