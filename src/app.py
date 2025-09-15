@@ -24,6 +24,8 @@ from prometheus_client import (
     generate_latest,
 )
 from supabase import Client, create_client
+import requests
+from bs4 import BeautifulSoup
 
 from fal_client import get_result, get_status, submit_text2video
 
@@ -49,6 +51,98 @@ PASSWORD_RE = re.compile(r"^(?=.*[A-Z])(?=.*\d).{8,}$")
 def sanitize_text(text: str) -> str:
     """Nettoyer le texte : autoriser seulement alphanumérique, tiret, underscore"""
     return re.sub(r"[^a-zA-Z0-9_-]", "", text)
+
+
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+
+
+def ollama_generate(prompt: str, model: str | None = None) -> str:
+    """Call a local Ollama model and return the generated text.
+
+    Si le service Ollama n'est pas disponible, renvoie une chaîne vide.
+    """
+    model = model or os.getenv("OLLAMA_MODEL", "mistral")
+    try:
+        resp = requests.post(
+            f"{OLLAMA_URL}/api/generate",
+            json={"model": model, "prompt": prompt, "stream": False},
+            timeout=20,
+        )
+        if resp.ok:
+            data = resp.json()
+            return data.get("response", "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def extract_keywords(text: str) -> list[str]:
+    """Utilise Ollama pour extraire des mots clés importants d'un texte."""
+    prompt = (
+        "Extract a comma separated list of up to five important keywords from the"
+        f" following text:\n{text}\nKeywords:"
+    )
+    response = ollama_generate(prompt)
+    if response:
+        keywords = [w.strip() for w in re.split(r"[,\n]", response) if w.strip()]
+        if keywords:
+            return keywords
+    return re.findall(r"\b\w+\b", text)[:3]
+
+
+def wikipedia_search(keywords: list[str]) -> dict[str, list[str]]:
+    """Recherche Wikipedia pour chaque mot-clé et renvoie une liste de liens."""
+    results: dict[str, list[str]] = {}
+    for kw in keywords:
+        try:
+            resp = requests.get(
+                "https://en.wikipedia.org/w/api.php",
+                params={
+                    "action": "query",
+                    "list": "search",
+                    "srsearch": kw,
+                    "format": "json",
+                    "utf8": 1,
+                },
+                timeout=10,
+            )
+            items = resp.json().get("query", {}).get("search", [])[:3]
+            links = []
+            for item in items:
+                title = item.get("title")
+                if title:
+                    url = f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}"
+                    links.append(url)
+            results[kw] = links
+        except Exception:
+            results[kw] = []
+    return results
+
+
+def scrape_and_clean(url: str) -> str:
+    """Récupère et nettoie le contenu textuel d'une page Wikipedia."""
+    try:
+        resp = requests.get(url, timeout=10)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        paragraphs = [p.get_text(" ", strip=True) for p in soup.select("p")]
+        text = " ".join(paragraphs)
+        text = re.sub(r"\[[^\]]*\]", "", text)
+        text = re.sub(r"\s+", " ", text)
+        return text
+    except Exception:
+        return ""
+
+
+def summarize_text(text: str) -> str:
+    """Résume un texte en utilisant Ollama ou un fallback simple."""
+    prompt = (
+        "Summarize the following text in a concise paragraph:\n"
+        f"{text}\nSummary:"
+    )
+    summary = ollama_generate(prompt)
+    if summary:
+        return summary
+    return text[:500]
 
 
 # 🔑 Connexion Postgres (infos depuis Supabase -> Database -> Connection info)
@@ -308,6 +402,18 @@ def generate_video():
     data = request.get_json(force=True)
     prompt = data.get("prompt", "")
     return jsonify({"status": "processing", "prompt": prompt}), 202
+
+
+@app.post("/wiki_summary")
+def wiki_summary():
+    """Analyse le texte, recherche sur Wikipedia et retourne un résumé."""
+    data = request.get_json(force=True)
+    query = data.get("query", "")
+    keywords = extract_keywords(query)
+    results = wikipedia_search(keywords)
+    texts = [scrape_and_clean(url) for links in results.values() for url in links]
+    summary = summarize_text(" ".join(texts)) if texts else ""
+    return jsonify({"keywords": keywords, "results": results, "summary": summary})
 
 
 @app.post("/submit_job")
