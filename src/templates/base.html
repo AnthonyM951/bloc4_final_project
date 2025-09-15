@@ -26,5 +26,14 @@
   <main class="max-w-6xl mx-auto p-6">
     {% block content %}{% endblock %}
   </main>
+  {% with messages = get_flashed_messages() %}
+  {% if messages %}
+  <script>
+  {% for msg in messages %}
+    alert("{{ msg }}");
+  {% endfor %}
+  </script>
+  {% endif %}
+  {% endwith %}
 </body>
 </html>

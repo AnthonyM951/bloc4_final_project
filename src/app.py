@@ -9,6 +9,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from flask import (
     Flask,
     Response,
+    flash,
     jsonify,
     redirect,
     render_template,
@@ -131,7 +132,11 @@ def login():
             # Fallback mode when Supabase isn't configured: accept provided user_id or email
             user_id = data.get("user_id") or email
             if not user_id:
-                return jsonify({"error": "Supabase client not available"}), 500
+                msg = "Supabase client not available"
+                if request.is_json:
+                    return jsonify({"error": msg}), 500
+                flash(msg)
+                return redirect(url_for("login"))
 
             session["user_id"] = user_id
             session["email"] = email
@@ -152,8 +157,9 @@ def login():
                             profile_payload.update(
                                 {"role": row[0], "gpu_minutes_quota": row[1]}
                             )
-                except Exception:
+                except Exception as e:
                     conn.rollback()
+                    flash(f"Database error fetching profile: {e}")
 
             if request.is_json:
                 return jsonify(profile_payload), 200
@@ -165,7 +171,11 @@ def login():
             )
             user = getattr(auth_resp, "user", None)
             if not user:
-                return jsonify({"error": "Invalid credentials"}), 401
+                msg = "Invalid credentials"
+                if request.is_json:
+                    return jsonify({"error": msg}), 401
+                flash(msg)
+                return redirect(url_for("login"))
 
             session["user_id"] = user.id
             session["email"] = email
@@ -173,19 +183,45 @@ def login():
             profile_payload = {"user_id": user.id, "email": email}
             session["role"] = "user"
             if conn:
-                # Ensure the connection is in a clean state before querying
-                conn.rollback()
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT role, gpu_minutes_quota FROM profiles WHERE user_id = %s",
-                        (user.id,),
-                    )
-                    row = cur.fetchone()
-                    if row:
-                        session["role"] = row[0]
-                        profile_payload.update(
-                            {"role": row[0], "gpu_minutes_quota": row[1]}
+                try:
+                    # Ensure the connection is in a clean state before querying
+                    conn.rollback()
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT role, gpu_minutes_quota FROM profiles WHERE user_id = %s",
+                            (user.id,),
                         )
+                        row = cur.fetchone()
+                        if row:
+                            session["role"] = row[0]
+                            profile_payload.update(
+                                {"role": row[0], "gpu_minutes_quota": row[1]}
+                            )
+                except Exception as e:
+                    conn.rollback()
+                    flash(f"Database error fetching profile: {e}")
+            elif supabase:
+                try:
+                    res = (
+                        supabase.table("profiles")
+                        .select("role, gpu_minutes_quota")
+                        .eq("user_id", user.id)
+                        .execute()
+                    )
+                    data = getattr(res, "data", None)
+                    if data:
+                        profile = data[0]
+                        session["role"] = profile.get("role", "user")
+                        profile_payload.update(
+                            {
+                                "role": profile.get("role"),
+                                "gpu_minutes_quota": profile.get(
+                                    "gpu_minutes_quota"
+                                ),
+                            }
+                        )
+                except Exception as e:
+                    flash(f"Supabase error fetching profile: {e}")
 
             if request.is_json:
                 return jsonify(profile_payload), 200
@@ -194,7 +230,10 @@ def login():
         except Exception as e:
             if conn:
                 conn.rollback()
-            return jsonify({"error": str(e)}), 400
+            if request.is_json:
+                return jsonify({"error": str(e)}), 400
+            flash(str(e))
+            return redirect(url_for("login"))
 
     return render_template("login.html")
 
