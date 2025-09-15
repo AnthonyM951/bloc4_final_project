@@ -3,6 +3,14 @@
 {% block content %}
 <div class="max-w-3xl mx-auto space-y-8">
   <h1 class="text-3xl font-semibold text-center">Dashboard</h1>
+  <div class="space-y-1 text-sm">
+    <p><strong>Email:</strong> {{ email }}</p>
+    <p><strong>User ID:</strong> {{ user_id }}</p>
+    <p><strong>Role:</strong> {{ role }}</p>
+    {% if gpu_minutes_quota is not none %}
+    <p><strong>GPU minutes quota:</strong> {{ gpu_minutes_quota }}</p>
+    {% endif %}
+  </div>
   {% if session.get('role') == 'admin' %}
   <div class="text-right">
     <a href="/admin" class="px-4 py-2 rounded bg-indigo-500 hover:bg-indigo-400 text-slate-900 font-semibold">Admin Dashboard</a>
