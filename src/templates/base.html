@@ -14,6 +14,7 @@
         <a href="/dashboard" class="hover:text-teal-300">Dashboard</a>
         {% if session.get('role') == 'admin' %}
         <a href="/admin" class="hover:text-teal-300">Admin</a>
+        <a href="/admin/tests" class="hover:text-teal-300">Tests</a>
         {% endif %}
         <a href="/logout" class="hover:text-teal-300">Logout</a>
         {% else %}

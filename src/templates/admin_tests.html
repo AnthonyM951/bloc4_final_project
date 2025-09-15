@@ -1,0 +1,34 @@
+{% extends 'base.html' %}
+{% block title %}Tests{% endblock %}
+{% block content %}
+<div class="space-y-8">
+  <h1 class="text-3xl font-semibold text-center">Cahier de recettes & tests</h1>
+  <p class="text-sm text-slate-300 text-center">Les tests fonctionnels, structurels et de sécurité exécutés sont conformes au plan défini.</p>
+  <section>
+    <h2 class="text-xl font-semibold mb-2">Scénarios</h2>
+    <table class="min-w-full text-sm">
+      <thead>
+        <tr class="text-left">
+          <th class="px-2 py-1">Scénario</th>
+          <th class="px-2 py-1">Résultat attendu</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for s in scenarios %}
+        <tr>
+          <td class="px-2 py-1">{{ s.scenario }}</td>
+          <td class="px-2 py-1">{{ s.expected }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+  <section>
+    <h2 class="text-xl font-semibold mb-2">Résultats des tests</h2>
+    <pre class="bg-slate-800 p-4 rounded text-sm overflow-x-auto">{{ output }}</pre>
+    {% if not success %}
+    <p class="text-red-400 mt-2">Certains tests ont échoué.</p>
+    {% endif %}
+  </section>
+</div>
+{% endblock %}
