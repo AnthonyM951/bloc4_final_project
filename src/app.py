@@ -128,7 +128,36 @@ def login():
         password = data.get("password", "")
 
         if supabase is None:
-            return jsonify({"error": "Supabase client not available"}), 500
+            # Fallback mode when Supabase isn't configured: accept provided user_id or email
+            user_id = data.get("user_id") or email
+            if not user_id:
+                return jsonify({"error": "Supabase client not available"}), 500
+
+            session["user_id"] = user_id
+            session["email"] = email
+
+            profile_payload = {"user_id": user_id, "email": email}
+            session["role"] = "user"
+            if conn:
+                try:
+                    conn.rollback()
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT role, gpu_minutes_quota FROM profiles WHERE user_id = %s",
+                            (user_id,),
+                        )
+                        row = cur.fetchone()
+                        if row:
+                            session["role"] = row[0]
+                            profile_payload.update(
+                                {"role": row[0], "gpu_minutes_quota": row[1]}
+                            )
+                except Exception:
+                    conn.rollback()
+
+            if request.is_json:
+                return jsonify(profile_payload), 200
+            return redirect(url_for("dashboard"))
 
         try:
             auth_resp = supabase.auth.sign_in_with_password(

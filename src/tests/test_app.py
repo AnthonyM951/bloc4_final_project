@@ -62,6 +62,23 @@ def test_login_page():
     assert "<form" in page
 
 
+def test_login_fallback(monkeypatch):
+    client = app.test_client()
+    # Ensure Supabase and DB connections are not used
+    monkeypatch.setattr(app_module, "supabase", None)
+    monkeypatch.setattr(app_module, "conn", None)
+
+    resp = client.post(
+        "/login",
+        json={"user_id": "u1", "email": "user@example.com"},
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["user_id"] == "u1"
+    with client.session_transaction() as sess:
+        assert sess["user_id"] == "u1"
+
+
 def test_register_page():
     client = app.test_client()
     resp = client.get("/register")
