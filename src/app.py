@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import subprocess
 from functools import wraps
 from time import time
 
@@ -401,6 +402,49 @@ def dashboard():
 def admin_dashboard():
     """Tableau de bord administrateur"""
     return render_template("admin_dashboard.html")
+
+
+@app.get("/admin/tests")
+@require_admin
+def admin_tests_page():
+    """Page affichant le cahier de tests et leurs résultats"""
+    scenarios = [
+        {
+            "scenario": "Accueil accessible",
+            "expected": "Affiche les boutons Connexion et Créer un compte",
+        },
+        {
+            "scenario": "Endpoint /api",
+            "expected": "Retourne le message API de génération vidéo",
+        },
+        {
+            "scenario": "Génération sans login",
+            "expected": "Redirige vers /login",
+        },
+        {
+            "scenario": "Validation inscription",
+            "expected": "Emails et mots de passe invalides rejetés",
+        },
+        {
+            "scenario": "Protection admin",
+            "expected": "Accès interdit si rôle ≠ admin",
+        },
+    ]
+    try:
+        proc = subprocess.run(
+            ["pytest", "-q"],
+            capture_output=True,
+            text=True,
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+        )
+        output = proc.stdout
+        success = proc.returncode == 0
+    except Exception as e:
+        output = str(e)
+        success = False
+    return render_template(
+        "admin_tests.html", scenarios=scenarios, output=output, success=success
+    )
 
 
 @app.get("/generate")
