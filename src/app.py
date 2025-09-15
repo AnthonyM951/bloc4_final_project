@@ -21,6 +21,7 @@ from prometheus_client import (
     CONTENT_TYPE_LATEST,
     Counter,
     Histogram,
+    Gauge,
     generate_latest,
 )
 from supabase import Client, create_client
@@ -38,6 +39,7 @@ load_dotenv()
 
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET", "dev-secret-change-me")
+app.config["JSONIFY_PRETTYPRINT_REGULAR"] = False
 
 MODEL_DEFAULT = os.getenv("FAL_MODEL", "fal-ai/veo3")
 
@@ -177,6 +179,11 @@ if SUPABASE_URL and SUPABASE_KEY:
 
 REQS = Counter("flask_http_requests_total", "count", ["method", "endpoint", "status"])
 LAT = Histogram("flask_http_request_seconds", "latency", ["endpoint"])
+INPROG = Gauge("flask_http_requests_in_progress", "in-progress HTTP requests")
+
+ALLOWED_METRICS_IPS = set(
+    os.getenv("METRICS_IP_WHITELIST", "127.0.0.1").split(",")
+)
 
 
 @app.context_processor
@@ -198,18 +205,26 @@ def require_admin(f):
 @app.before_request
 def _t0():
     request._t0 = time()
+    if request.endpoint != "metrics":
+        INPROG.inc()
 
 
 @app.after_request
 def _metrics(resp):
     dt = time() - getattr(request, "_t0", time())
-    REQS.labels(request.method, request.endpoint or "unknown", resp.status_code).inc()
-    LAT.labels(request.endpoint or "unknown").observe(dt)
+    if request.endpoint != "metrics":
+        REQS.labels(
+            request.method, request.endpoint or "unknown", resp.status_code
+        ).inc()
+        LAT.labels(request.endpoint or "unknown").observe(dt)
+        INPROG.dec()
     return resp
 
 
 @app.get("/metrics")
 def metrics():
+    if request.remote_addr not in ALLOWED_METRICS_IPS:
+        return jsonify({"error": "forbidden"}), 403
     return Response(generate_latest(), mimetype=CONTENT_TYPE_LATEST)
 
 
