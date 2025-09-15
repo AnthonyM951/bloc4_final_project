@@ -68,15 +68,26 @@ except Exception:
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY")  # ⚠️ utilise la service_role key
 supabase: Client | None = None
+supabase_connected = False
 if SUPABASE_URL and SUPABASE_KEY:
     try:
         supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+        # Vérifie la connexion en faisant une requête simple
+        supabase.table("profiles").select("id").limit(1).execute()
+        supabase_connected = True
     except Exception:
         supabase = None
+        supabase_connected = False
 
 
 REQS = Counter("flask_http_requests_total", "count", ["method", "endpoint", "status"])
 LAT = Histogram("flask_http_request_seconds", "latency", ["endpoint"])
+
+
+@app.context_processor
+def inject_supabase_status():
+    """Injecte l'état de connexion Supabase dans les templates"""
+    return {"supabase_connected": supabase_connected}
 
 
 def require_admin(f):

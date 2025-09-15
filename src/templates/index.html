@@ -4,6 +4,11 @@
 <section class="text-center py-24">
   <h1 class="text-5xl font-bold mb-6 tracking-tight">Veo 3 Fast [Image to Video]</h1>
   <p class="mb-8 text-lg text-slate-300">Generate videos from your image prompts using Veo 3 fast.</p>
+  {% if supabase_connected %}
+  <p class="mb-4 text-sm text-green-400">Connexion à Supabase réussie</p>
+  {% else %}
+  <p class="mb-4 text-sm text-red-400">Échec de connexion à Supabase</p>
+  {% endif %}
   <div class="space-x-4">
     {% if session.get('user_id') %}
     <a href="/generate" class="px-6 py-3 rounded-md bg-teal-500 hover:bg-teal-400 text-slate-900 font-semibold">Essayer</a>
