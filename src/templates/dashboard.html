@@ -21,6 +21,9 @@
     <input id="image-url" class="w-full px-4 py-2 rounded bg-slate-900 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-teal-500" type="text" placeholder="Image URL" required />
     <button class="w-full py-2 rounded bg-teal-500 hover:bg-teal-400 text-slate-900 font-semibold" type="submit">Submit</button>
   </form>
+  <div class="text-right">
+    <button id="refresh-jobs" class="px-4 py-2 rounded bg-teal-500 hover:bg-teal-400 text-slate-900 font-semibold">Refresh Jobs</button>
+  </div>
   <table class="min-w-full text-sm" id="jobs-table">
     <thead>
       <tr class="text-left">
@@ -68,6 +71,8 @@ document.getElementById('job-form').addEventListener('submit', async (e) => {
   });
   loadJobs();
 });
+
+document.getElementById('refresh-jobs').addEventListener('click', loadJobs);
 
 document.addEventListener('DOMContentLoaded', loadJobs);
 </script>
