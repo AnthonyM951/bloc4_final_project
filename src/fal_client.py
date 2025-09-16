@@ -4,7 +4,6 @@ from typing import Any
 
 import requests
 
-FAL_BASE = os.getenv("FAL_API_BASE", "https://api.fal.ai")
 FAL_QUEUE_BASE = os.getenv("FAL_QUEUE_BASE", "https://queue.fal.run")
 FAL_KEY = os.getenv("FAL_KEY")
 
@@ -55,24 +54,26 @@ def submit_text2video(
     return data.get("request_id") or data.get("id")
 
 
+def _queue_request_url(model_id: str, *parts: str) -> str:
+    """Return a fully qualified queue endpoint for *model_id* and *parts*."""
+
+    base_path = model_id.strip("/")
+    extra = "/".join(part.strip("/") for part in parts if part)
+    if extra:
+        return f"{FAL_QUEUE_BASE.rstrip('/')}/{base_path}/{extra}"
+    return f"{FAL_QUEUE_BASE.rstrip('/')}/{base_path}"
+
+
 def get_status(model_id: str, request_id: str) -> dict:
-    r = requests.get(
-        f"{FAL_BASE}/models/{model_id}/api/queue/status",
-        headers=_headers(False),
-        params={"requestId": request_id},
-        timeout=20,
-    )
+    endpoint = _queue_request_url(model_id, "requests", request_id, "status")
+    r = requests.get(endpoint, headers=_headers(False), timeout=30)
     r.raise_for_status()
     return r.json()
 
 
 def get_result(model_id: str, request_id: str) -> dict:
-    r = requests.get(
-        f"{FAL_BASE}/models/{model_id}/api/queue/result",
-        headers=_headers(False),
-        params={"requestId": request_id},
-        timeout=30,
-    )
+    endpoint = _queue_request_url(model_id, "requests", request_id)
+    r = requests.get(endpoint, headers=_headers(False), timeout=30)
     r.raise_for_status()
     return r.json()
 
