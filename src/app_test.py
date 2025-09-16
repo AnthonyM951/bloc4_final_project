@@ -5,7 +5,6 @@ import requests
 FAL_KEY = os.getenv("FAL_KEY", "3e9ddf21-a57e-4b69-9eb9-2d9d336acf92:0296b68b75feab14420a58c753385b05")
 FAL_QUEUE_BASE = os.getenv("FAL_QUEUE_BASE", "https://queue.fal.run")
 MODEL = os.getenv("MODEL_DEFAULT", "fal-ai/infinitalk/single-text")
-WEBHOOK_URL = os.getenv("FAL_WEBHOOK_URL", "https://aa55bccb10e4.ngrok-free.app/webhooks/fal")
 
 fal_input = {
     "prompt": "un professeur donne un cours en souriant",
@@ -25,7 +24,6 @@ headers = {
 
 payload = {
     "input": fal_input,
-    "webhook_url": WEBHOOK_URL,  # pour voir si ton app reçoit bien le callback
 }
 
 url = f"{FAL_QUEUE_BASE}/{MODEL}"

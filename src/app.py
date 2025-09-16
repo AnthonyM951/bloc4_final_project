@@ -30,7 +30,6 @@ import requests
 from bs4 import BeautifulSoup
 
 from fal_client import get_result, get_status, submit_text2video
-from fal_webhook import FalWebhookVerificationError, verify_fal_webhook
 
 def debug_log(func):
     """Décorateur pour tracer les appels de fonction et leurs retours."""
@@ -73,12 +72,6 @@ app.secret_key = os.getenv("FLASK_SECRET", "dev-secret-change-me")
 app.config["JSONIFY_PRETTYPRINT_REGULAR"] = False
 
 MODEL_DEFAULT = os.getenv("MODEL_DEFAULT")
-
-VERIFY_FAL_WEBHOOKS = os.getenv("FAL_VERIFY_WEBHOOKS", "1").lower() not in {
-    "0",
-    "false",
-    "no",
-}
 
 @dataclass
 class CourseMaterial:
@@ -410,14 +403,6 @@ def _poll_fal_job(job_id: str, request_id: str, model_id: str) -> None:
             and status_upper not in failure_states
             and status_upper != last_status
         ):
-            _record_fal_webhook_event(
-                job_row,
-                status=status_label or status_upper,
-                request_id=request_identifier,
-                gateway_request_id=None,
-                raw_payload=status_payload if isinstance(status_payload, Mapping) else None,
-                result_payload=None,
-            )
             last_status = status_upper
 
         if status_upper in success_states:
@@ -434,29 +419,11 @@ def _poll_fal_job(job_id: str, request_id: str, model_id: str) -> None:
 
             job_row = _load_job_row(job_identifier) or job_row
 
-            _record_fal_webhook_event(
-                job_row,
-                status=status_label or status_upper,
-                request_id=request_identifier,
-                gateway_request_id=None,
-                raw_payload=status_payload if isinstance(status_payload, Mapping) else None,
-                result_payload=result_payload,
-            )
-
             _finalize_fal_job_success(job_row, result_payload)
             return
 
         if status_upper in failure_states:
             job_row = _load_job_row(job_identifier) or job_row
-
-            _record_fal_webhook_event(
-                job_row,
-                status=status_label or status_upper,
-                request_id=request_identifier,
-                gateway_request_id=None,
-                raw_payload=status_payload if isinstance(status_payload, Mapping) else None,
-                result_payload=status_payload,
-            )
 
             _mark_job_failed(job_identifier, status_payload)
             return
@@ -469,74 +436,6 @@ def _poll_fal_job(job_id: str, request_id: str, model_id: str) -> None:
             )
 
         sleep(5)
-
-
-def _record_fal_webhook_event(
-    job_row: Mapping[str, Any],
-    *,
-    status: str | None,
-    request_id: str | None,
-    gateway_request_id: str | None,
-    raw_payload: Mapping[str, Any] | None,
-    result_payload: object,
-) -> dict[str, Any] | None:
-    """Persist the latest fal.ai webhook payload for debugging purposes."""
-
-    if supabase is None:
-        return None
-
-    job_id = _normalize_job_id(job_row.get("id"))
-    if job_id is None:
-        return None
-
-    params_dict = _coerce_mapping(job_row.get("params"))
-    new_params = dict(params_dict)
-
-    debug_section_raw = new_params.get("debug")
-    debug_section = _coerce_mapping(debug_section_raw) if debug_section_raw is not None else {}
-    debug_dict = dict(debug_section)
-
-    event: dict[str, Any] = {"received_at": current_timestamp()}
-    if status:
-        event["status"] = status
-    if request_id:
-        event["request_id"] = request_id
-    if gateway_request_id:
-        event["gateway_request_id"] = gateway_request_id
-    if raw_payload is not None:
-        event["raw_payload"] = raw_payload
-    if result_payload is not None:
-        event["content"] = result_payload
-
-    events_history_raw = debug_dict.get("webhook_events")
-    events_history: list[dict[str, Any]] = []
-    if isinstance(events_history_raw, Sequence) and not isinstance(
-        events_history_raw, (str, bytes, bytearray)
-    ):
-        for item in events_history_raw:
-            if isinstance(item, Mapping):
-                events_history.append(dict(item))
-            elif isinstance(item, str):
-                parsed = _coerce_mapping(item)
-                if parsed:
-                    events_history.append(dict(parsed))
-
-    events_history.append(event)
-    if len(events_history) > 20:
-        events_history = events_history[-20:]
-
-    debug_dict["webhook_events"] = events_history
-    debug_dict["last_webhook_event"] = events_history[-1]
-    new_params["debug"] = debug_dict
-
-    try:
-        supabase.table("jobs").update({"params": new_params}).eq("id", job_id).execute()
-    except Exception as exc:  # pragma: no cover - Supabase optional logging
-        app.logger.debug("Unable to persist webhook payload for job %s: %s", job_id, exc)
-        return None
-
-    job_row["params"] = new_params
-    return events_history[-1]
 
 
 def _extract_video_details(payload: object) -> tuple[str | None, dict[str, Any]]:
@@ -1365,117 +1264,6 @@ def submit_job():
         return jsonify(job), 201
     except Exception as e:
         return jsonify({"error": str(e)}), 400
-
-
-@app.post("/webhooks/fal")
-def fal_webhook():
-    """Réception des webhooks fal.ai (succès, erreur, en cours)."""
-    if supabase is None:
-        return jsonify({"error": "Supabase not available"}), 500
-
-    raw_body = request.get_data(cache=True) or b""
-    if VERIFY_FAL_WEBHOOKS:
-        try:
-            verify_fal_webhook(request.headers, raw_body)
-        except FalWebhookVerificationError as exc:
-            return jsonify({"error": f"invalid webhook: {exc}"}), 400
-
-    payload = request.get_json(silent=True)
-    if not isinstance(payload, dict):
-        return jsonify({"error": "invalid payload"}), 400
-
-    request_id = payload.get("request_id") or payload.get("id")
-    status = payload.get("status")
-    gateway_request_id = payload.get("gateway_request_id")
-
-    result_payload = payload.get("payload")
-    if not isinstance(result_payload, Mapping):
-        response_payload = payload.get("response")
-        if isinstance(response_payload, Mapping):
-            result_payload = response_payload
-        else:
-            result_payload = payload
-
-    if not request_id:
-        return jsonify({"error": "missing request_id"}), 400
-
-    try:
-        res = (
-            supabase.table("jobs")
-            .select("id, user_id, params, prompt")
-            .eq("external_job_id", request_id)
-            .execute()
-        )
-        if not res.data:
-            return jsonify({"error": "job not found"}), 404
-
-        job = res.data[0]
-        job_id = job["id"]
-
-        if request_id is not None and not isinstance(request_id, str):
-            request_id = str(request_id)
-        if gateway_request_id is not None and not isinstance(gateway_request_id, str):
-            gateway_request_id = str(gateway_request_id)
-
-        if gateway_request_id and gateway_request_id != request_id:
-            supabase.table("jobs").update({"external_job_id": gateway_request_id}).eq("id", job_id).execute()
-
-        status_upper = (status or "").upper()
-        status_label = status_upper or (status if isinstance(status, str) else None)
-
-        log_message = (
-            f"fal.ai webhook update for job {job_id} "
-            f"(request={request_id or '?'} gateway={gateway_request_id or '?'} status={status_label or '?'})"
-        )
-        app.logger.info("%s payload=%s", log_message, payload)
-        try:
-            print(f"{log_message} payload={payload}", flush=True)
-        except Exception:  # pragma: no cover - printing best effort
-            pass
-
-        event_record = _record_fal_webhook_event(
-            job,
-            status=status_label,
-            request_id=request_id,
-            gateway_request_id=gateway_request_id,
-            raw_payload=payload,
-            result_payload=result_payload,
-        )
-
-        if status_upper in {"SUCCESS", "OK", "COMPLETED"}:
-            _finalize_fal_job_success(job, result_payload)
-
-        elif status_upper in {"FAILED", "ERROR", "CANCELLED"}:
-            error_detail = _normalize_error_message(payload, result_payload)
-            normalized_error = _stringify_error_detail(error_detail)
-            app.logger.error(
-                "fal.ai job %s failed with status %s: %s",
-                request_id,
-                status_upper or "?",
-                normalized_error,
-            )
-            supabase.table("jobs").update({
-                "status": "failed",
-                "error": normalized_error
-            }).eq("id", job_id).execute()
-
-        else:
-            supabase.table("jobs").update({"status": "running"}).eq("id", job_id).execute()
-
-        response_payload: dict[str, object] = {"ok": True, "job_id": job_id}
-        if status_label:
-            response_payload["status"] = status_label
-        if request_id:
-            response_payload["request_id"] = request_id
-        if gateway_request_id:
-            response_payload["gateway_request_id"] = gateway_request_id
-        if event_record:
-            response_payload["webhook_event"] = event_record
-
-        return jsonify(response_payload)
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
 
 @app.post("/submit_job_fal")

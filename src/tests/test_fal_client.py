@@ -46,14 +46,13 @@ def test_submit_text2video_flattens_payload(capture_post):
             "prompt": "hello",
             "voice": "Brian",
         },
-        webhook_url="https://example.com/webhooks/fal",
     )
 
     assert req_id == "req-123"
     payload = capture_post["json"]
     assert payload["prompt"] == "hello"
     assert payload["voice"] == "Brian"
-    assert payload["webhook_url"] == "https://example.com/webhooks/fal"
+    assert "webhook_url" not in payload
     assert "input" not in payload
 
 
