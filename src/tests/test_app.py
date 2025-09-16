@@ -164,45 +164,43 @@ def test_logout_clears_session():
 def test_wiki_summary(monkeypatch):
     client = app.test_client()
 
-    def fake_extract(text):
-        return ["python", "language"]
+    dummy_material = app_module.CourseMaterial(
+        topic="Python course",
+        keywords=["python", "language"],
+        sources={"python": ["http://example.com"]},
+        script="summary",
+        animation_prompt="A professor explains Python",
+        errors=[],
+    )
 
-    def fake_search(keywords):
-        return ({k: ["http://example.com"] for k in keywords}, {})
-
-    def fake_scrape(url):
-        return "Python is a programming language.", None  # pragma: no cover
-
-    def fake_summary(text, topic_hint=None):
-        return "summary"  # pragma: no cover
-
-    monkeypatch.setattr(app_module, "extract_keywords", fake_extract)
-    monkeypatch.setattr(app_module, "wikipedia_search", fake_search)
-    monkeypatch.setattr(app_module, "scrape_and_clean", fake_scrape)
-    monkeypatch.setattr(app_module, "summarize_text", fake_summary)
+    monkeypatch.setattr(
+        app_module, "prepare_course_material", lambda query: dummy_material
+    )
 
     resp = client.post("/wiki_summary", json={"query": "Python language"})
     assert resp.status_code == 200
     data = resp.get_json()
     assert data["keywords"] == ["python", "language"]
     assert data["summary"] == "summary"
+    assert data["animation_prompt"] == "A professor explains Python"
+    assert data["video_script"] == "summary"
 
 
 def test_wiki_summary_reports_errors(monkeypatch):
     client = app.test_client()
 
-    def fake_extract(text):
-        return ["python"]
+    dummy_material = app_module.CourseMaterial(
+        topic="Python",
+        keywords=["python"],
+        sources={"python": []},
+        script="",
+        animation_prompt="Professor explains Python",
+        errors=["Search for 'python' failed: 403 Forbidden"],
+    )
 
-    def fake_search(keywords):
-        return ({kw: [] for kw in keywords}, {"python": "403 Forbidden"})
-
-    def fake_scrape(url):
-        return "", "timeout"  # pragma: no cover
-
-    monkeypatch.setattr(app_module, "extract_keywords", fake_extract)
-    monkeypatch.setattr(app_module, "wikipedia_search", fake_search)
-    monkeypatch.setattr(app_module, "scrape_and_clean", fake_scrape)
+    monkeypatch.setattr(
+        app_module, "prepare_course_material", lambda query: dummy_material
+    )
 
     resp = client.post("/wiki_summary", json={"query": "Python"})
     assert resp.status_code == 200
@@ -210,6 +208,41 @@ def test_wiki_summary_reports_errors(monkeypatch):
     assert data["summary"] == ""
     assert "errors" in data
     assert any("python" in message for message in data["errors"])
+
+
+def test_prepare_course_material_pipeline(monkeypatch):
+    topic = "Tyrannosaurus rex"
+
+    monkeypatch.setattr(app_module, "extract_keywords", lambda text: ["tyrannosaurus"])
+    monkeypatch.setattr(
+        app_module,
+        "wikipedia_search",
+        lambda keywords: ({keywords[0]: ["http://example.com/trex"]}, {}),
+    )
+    monkeypatch.setattr(
+        app_module,
+        "scrape_and_clean",
+        lambda url: ("T. rex was one of the largest land predators.", None),
+    )
+    monkeypatch.setattr(
+        app_module,
+        "summarize_text",
+        lambda text, topic_hint=None: f"Lesson about {topic_hint}",
+    )
+    monkeypatch.setattr(
+        app_module,
+        "build_character_prompt",
+        lambda topic_text: f"Professor explains {topic_text}",
+    )
+
+    material = app_module.prepare_course_material(topic)
+
+    assert material.topic == topic
+    assert material.keywords == ["tyrannosaurus"]
+    assert material.sources == {"tyrannosaurus": ["http://example.com/trex"]}
+    assert material.script == f"Lesson about {topic}"
+    assert material.animation_prompt == f"Professor explains {topic}"
+    assert material.errors == []
 
 
 def test_wikipedia_search_uses_user_agent(monkeypatch):

@@ -18,12 +18,28 @@ def test_submit_job_fal(monkeypatch):
     monkeypatch.setattr(app_module, "supabase", dummy_supabase)
     captured: dict[str, object] = {}
 
+    dummy_material = app_module.CourseMaterial(
+        topic="Tyrannosaurus rex",
+        keywords=["tyrannosaurus", "cretaceous"],
+        sources={"tyrannosaurus": ["http://example.com/trex"]},
+        script="Video lesson about the Tyrannosaurus rex.",
+        animation_prompt="A professor faces the viewer explaining the Tyrannosaurus rex.",
+        errors=[],
+    )
+
+    called_topic: dict[str, str] = {}
+
+    def fake_prepare(query):
+        called_topic["topic"] = query
+        return dummy_material
+
     def fake_submit(model_id, payload, webhook_url=None):
         captured["model_id"] = model_id
         captured["payload"] = payload
         captured["webhook_url"] = webhook_url
         return "req_123"
 
+    monkeypatch.setattr(app_module, "prepare_course_material", fake_prepare)
     monkeypatch.setattr(app_module, "submit_text2video", fake_submit)
 
     body = {
@@ -44,11 +60,18 @@ def test_submit_job_fal(monkeypatch):
     data = resp.get_json()
     assert data["external_job_id"] == "req_123"
     assert data["webhook_url"].endswith("/webhooks/fal")
+    assert "course_material" in data
+    assert data["course_material"]["summary"] == dummy_material.script
+    assert data["course_material"]["animation_prompt"] == dummy_material.animation_prompt
     inserts = [rec for rec in dummy_supabase.records if rec.op == "insert" and rec.table == "jobs"]
-    assert inserts and inserts[0].payload["prompt"] == body["prompt"]
+    assert inserts and inserts[0].payload["prompt"] == dummy_material.animation_prompt
     params = inserts[0].payload["params"]
     assert params["model_id"] == "fal-ai/infinitalk/single-text"
     assert params["fal_input"] == captured["payload"]
+    assert params["course_material"]["summary"] == dummy_material.script
+    assert params["course_material"]["keywords"] == dummy_material.keywords
+    assert params["course_material"]["learner_prompt"] == body["prompt"]
+    assert params["original_prompt"] == body["prompt"]
     updates = [rec for rec in dummy_supabase.records if rec.op == "update" and rec.table == "jobs"]
     assert any(rec.payload.get("external_job_id") == "req_123" for rec in updates)
 
@@ -56,8 +79,8 @@ def test_submit_job_fal(monkeypatch):
     assert captured["webhook_url"].endswith("/webhooks/fal")
     assert captured["webhook_url"] == data["webhook_url"]
     assert captured["payload"] == {
-        "prompt": body["prompt"],
-        "text_input": body["text_input"],
+        "prompt": dummy_material.animation_prompt,
+        "text_input": dummy_material.script,
         "image_url": body["image_url"],
         "voice": "Brian",
         "num_frames": 145,
@@ -65,6 +88,8 @@ def test_submit_job_fal(monkeypatch):
         "seed": 42,
         "acceleration": "regular",
     }
+
+    assert called_topic["topic"] == body["text_input"]
 
 
 def test_fal_webhook_verification(monkeypatch):
@@ -118,6 +143,16 @@ def test_fal_webhook_verification(monkeypatch):
     ]
     assert video_inserts and video_inserts[0].payload["job_id"] == 1
 
+    param_updates = [
+        rec
+        for rec in dummy_supabase.records
+        if rec.op == "update" and rec.table == "jobs" and "params" in rec.payload
+    ]
+    assert param_updates
+    fal_result = param_updates[0].payload["params"].get("fal_result")
+    assert fal_result and fal_result["video"]["url"] == "http://cdn/video.mp4"
+    assert fal_result["payload"]["video"]["url"] == "http://cdn/video.mp4"
+
 
 def test_fal_webhook_rejects_invalid_signature(monkeypatch):
     client = app.test_client()
@@ -168,6 +203,10 @@ def test_scheduler_sync_success(monkeypatch):
     assert video_inserts and video_inserts[0].payload["job_id"] == 1
     job_updates = [rec for rec in dummy_supabase.records if rec.op == "update" and rec.table == "jobs"]
     assert any(rec.payload.get("status") == "succeeded" for rec in job_updates)
+    params_updates = [rec for rec in job_updates if "params" in rec.payload]
+    assert params_updates
+    stored_result = params_updates[0].payload["params"]["fal_result"]
+    assert stored_result["video"]["url"] == "http://v"
 
 
 def test_admin_guard():

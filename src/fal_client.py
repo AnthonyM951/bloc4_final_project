@@ -1,3 +1,4 @@
+import asyncio
 import os
 from collections.abc import Mapping
 from typing import Any
@@ -73,6 +74,12 @@ def get_result(model_id: str, request_id: str) -> dict:
     r = requests.get(endpoint, headers=_headers(False), timeout=30)
     r.raise_for_status()
     return r.json()
+
+
+async def result_async(model_id: str, request_id: str) -> dict:
+    """Return the fal.ai result using an asynchronous interface."""
+
+    return await asyncio.to_thread(get_result, model_id, request_id)
 
 
 # Backwards compatibility helpers used by worker.py tests
