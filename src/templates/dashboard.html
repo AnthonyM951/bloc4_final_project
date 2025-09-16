@@ -51,6 +51,7 @@
         <th class="px-2 py-1">Provider</th>
         <th class="px-2 py-1">Request ID</th>
         <th class="px-2 py-1">Status</th>
+        <th class="px-2 py-1">Error</th>
         <th class="px-2 py-1">Submitted</th>
         <th class="px-2 py-1">Video</th>
       </tr>
@@ -229,7 +230,35 @@ function renderScrapeResults(data, jobId) {
 
 function normalizeError(err) {
   if (err instanceof Error) return err.message;
-  return typeof err === 'string' ? err : JSON.stringify(err);
+  if (err === null || err === undefined) return '';
+  if (typeof err === 'string') return err;
+  try {
+    return JSON.stringify(err);
+  } catch (serializationError) {
+    return String(err);
+  }
+}
+
+function formatJobErrorDetail(err) {
+  const normalized = normalizeError(err).trim();
+  if (!normalized || normalized === 'null' || normalized === 'undefined') {
+    return { short: '', full: '' };
+  }
+  const limit = 160;
+  const short = normalized.length > limit ? `${normalized.slice(0, limit - 1)}…` : normalized;
+  return { short, full: normalized };
+}
+
+function escapeHtml(value) {
+  if (value === null || value === undefined) return '';
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+    .replace(/\n/g, '&#10;')
+    .replace(/\r/g, '&#13;');
 }
 
 async function loadJobs() {
@@ -249,11 +278,16 @@ async function loadJobs() {
     const promptText = job.prompt || '';
     const submittedAt = job.submitted_at || '—';
     const statusText = job.status || '—';
+    const { short: errorShort, full: errorFull } = formatJobErrorDetail(job.error);
+    const errorCell = errorFull
+      ? `<span title="${escapeHtml(errorFull)}">${escapeHtml(errorShort)}</span>`
+      : '—';
     tr.innerHTML = `<td class="px-2 py-1">${job.id}</td>`+
                    `<td class="px-2 py-1">${promptText}</td>`+
                    `<td class="px-2 py-1">${provider}</td>`+
                    `<td class="px-2 py-1">${requestId}</td>`+
                    `<td class="px-2 py-1">${statusText}</td>`+
+                   `<td class="px-2 py-1">${errorCell}</td>`+
                    `<td class="px-2 py-1">${submittedAt}</td>`+
                    `<td class="px-2 py-1">${videoLinks}</td>`;
     body.appendChild(tr);
@@ -337,10 +371,23 @@ async function pollJobUntilComplete(jobId, options = {}) {
 
     if (normalizedStatus === 'failed') {
       if (sequence !== pollSequence) return;
-      setStatus('webhook', 'error', 'fal.ai reported a failure');
+      const { short: errorShort, full: errorFull } = formatJobErrorDetail(job.error);
+      const webhookMessage = errorShort ? `fal.ai failure: ${errorShort}` : 'fal.ai reported a failure';
+      setStatus('webhook', 'error', webhookMessage);
       setStatus('generation', 'error', 'Generation failed');
       const reqDisplay = knownRequestId ? ` (request ${knownRequestId})` : '';
-      updateGenerationStatus(`Video generation failed for job #${jobId}${reqDisplay}.`, 'error');
+      let statusNote = `Video generation failed for job #${jobId}${reqDisplay}.`;
+      if (errorFull) {
+        statusNote += ` Reason: ${errorFull}`;
+      }
+      const debugMessage = errorFull ? `fal.ai error: ${errorFull}` : 'fal.ai reported a failure.';
+      updateDebugMessage(debugMessage, 'error');
+      console.error('fal.ai job failed', {
+        jobId,
+        requestId: knownRequestId || job.external_job_id || null,
+        error: errorFull || job.error || null
+      });
+      updateGenerationStatus(statusNote, 'error');
       loadJobs();
       return;
     }
