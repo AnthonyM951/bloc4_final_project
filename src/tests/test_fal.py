@@ -17,7 +17,7 @@ def test_submit_job_fal(monkeypatch):
 
     dummy_supabase = DummySupabase()
     monkeypatch.setattr(app_module, "supabase", dummy_supabase)
-    captured: dict[str, object] = {}
+    captured: dict[str, object] = {"status_calls": [], "result_calls": []}
 
     dummy_material = app_module.CourseMaterial(
         topic="Tyrannosaurus rex",
@@ -40,8 +40,36 @@ def test_submit_job_fal(monkeypatch):
         captured["webhook_url"] = webhook_url
         return "req_123"
 
+    def fake_get_status(model_id, request_id):
+        captured["status_calls"].append((model_id, request_id))
+        return {"status": "COMPLETED"}
+
+    def fake_get_result(model_id, request_id):
+        captured["result_calls"].append((model_id, request_id))
+        return {"video": {"url": "http://cdn/video.mp4"}}
+
+    class ImmediateThread:
+        def __init__(self, target, args=(), kwargs=None, daemon=None):
+            self._target = target
+            self._args = args
+            self._kwargs = kwargs or {}
+
+        def start(self):
+            self._target(*self._args, **self._kwargs)
+
+    def fake_load_job_row(job_id: str):
+        for record in reversed(dummy_supabase.records):
+            if record.op == "insert" and record.table == "jobs":
+                if str(record.payload.get("id")) == str(job_id):
+                    return dict(record.payload)
+        return None
+
     monkeypatch.setattr(app_module, "prepare_course_material", fake_prepare)
     monkeypatch.setattr(app_module, "submit_text2video", fake_submit)
+    monkeypatch.setattr(app_module, "get_status", fake_get_status)
+    monkeypatch.setattr(app_module, "get_result", fake_get_result)
+    monkeypatch.setattr(app_module, "Thread", ImmediateThread)
+    monkeypatch.setattr(app_module, "_load_job_row", fake_load_job_row)
 
     body = {
         "user_id": 1,
@@ -60,7 +88,8 @@ def test_submit_job_fal(monkeypatch):
     assert resp.status_code == 202
     data = resp.get_json()
     assert data["external_job_id"] == "req_123"
-    assert data["webhook_url"].endswith("/webhooks/fal")
+    assert data["status"] == "queued"
+    assert "webhook_url" not in data
     assert "course_material" in data
     assert data["course_material"]["summary"] == dummy_material.script
     assert data["course_material"]["animation_prompt"] == dummy_material.animation_prompt
@@ -77,8 +106,6 @@ def test_submit_job_fal(monkeypatch):
     assert any(rec.payload.get("external_job_id") == "req_123" for rec in updates)
 
     assert captured["model_id"] == "fal-ai/infinitalk/single-text"
-    assert captured["webhook_url"].endswith("/webhooks/fal")
-    assert captured["webhook_url"] == data["webhook_url"]
     assert captured["payload"] == {
         "prompt": dummy_material.animation_prompt,
         "text_input": dummy_material.script,
@@ -89,6 +116,23 @@ def test_submit_job_fal(monkeypatch):
         "seed": 42,
         "acceleration": "regular",
     }
+    assert captured["webhook_url"] is None
+
+    assert captured["status_calls"] == [(body["model_id"], "req_123")]
+    assert captured["result_calls"] == [(body["model_id"], "req_123")]
+
+    video_inserts = [
+        rec for rec in dummy_supabase.records if rec.op == "insert" and rec.table == "videos"
+    ]
+    assert video_inserts
+    assert video_inserts[0].payload["source_url"] == "http://cdn/video.mp4"
+
+    status_updates = [
+        rec
+        for rec in dummy_supabase.records
+        if rec.op == "update" and rec.table == "jobs" and rec.payload.get("status")
+    ]
+    assert any(update.payload.get("status") == "succeeded" for update in status_updates)
 
     assert called_topic["topic"] == body["text_input"]
 
