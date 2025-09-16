@@ -699,14 +699,27 @@ def fal_webhook():
         elif status_upper in {"FAILED", "ERROR"}:
             error_detail = payload.get("error")
             if not error_detail and isinstance(result_payload, dict):
-                detail = result_payload.get("detail")
+                detail = result_payload.get("detail") or result_payload.get("error")
                 if isinstance(detail, str):
                     error_detail = detail
                 elif isinstance(detail, list) and detail:
-                    error_detail = str(detail[0])
+                    first_detail = detail[0]
+                    error_detail = first_detail if isinstance(first_detail, str) else str(first_detail)
+            normalized_error = error_detail or "fal error"
+            if not isinstance(normalized_error, str):
+                try:
+                    normalized_error = json.dumps(normalized_error, ensure_ascii=False)
+                except TypeError:
+                    normalized_error = str(normalized_error)
+            app.logger.error(
+                "fal.ai job %s failed with status %s: %s",
+                request_id,
+                status_upper or "?",
+                normalized_error,
+            )
             supabase.table("jobs").update({
                 "status": "failed",
-                "error": error_detail or "fal error"
+                "error": normalized_error
             }).eq("id", job_id).execute()
 
         else:
@@ -795,9 +808,23 @@ def submit_job_fal():
             webhook_url = None
 
     try:
+        try:
+            serialized_input = json.dumps(fal_input, ensure_ascii=False)
+        except TypeError:
+            serialized_input = str(fal_input)
+        app.logger.info(
+            "Submitting fal.ai job %s with model %s and payload %s (webhook=%s)",
+            job_id,
+            model_id,
+            serialized_input,
+            webhook_url or "<none>",
+        )
         external_id = submit_text2video(model_id, fal_input, webhook_url=webhook_url)
         supabase.table("jobs").update({"external_job_id": external_id}).eq("id", job_id).execute()
     except Exception as e:
+        app.logger.exception(
+            "Fal submission failed for job %s with model %s", job_id, model_id
+        )
         return jsonify({"error": f"Fal submission failed: {e}"}), 502
 
     payload = {
