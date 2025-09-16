@@ -9,8 +9,23 @@ import time
 from typing import Callable, Iterable, Mapping, Sequence
 
 import requests
-from nacl.exceptions import BadSignatureError
-from nacl.signing import VerifyKey
+
+try:  # pragma: no cover - optional dependency
+    from nacl.exceptions import BadSignatureError
+    from nacl.signing import VerifyKey
+    _HAS_NACL = True
+except ImportError:  # pragma: no cover - executed in CI without PyNaCl
+    BadSignatureError = Exception  # type: ignore[assignment]
+
+    class _MissingVerifyKey:  # pragma: no cover - simple fallback
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("PyNaCl is required to verify fal.ai webhooks")
+
+        def verify(self, *args, **kwargs):
+            raise RuntimeError("PyNaCl is required to verify fal.ai webhooks")
+
+    VerifyKey = _MissingVerifyKey  # type: ignore[assignment]
+    _HAS_NACL = False
 
 
 __all__ = [
@@ -86,6 +101,9 @@ def verify_fal_webhook(
     Raises ``FalWebhookVerificationError`` when the request cannot be
     authenticated.
     """
+
+    if not _HAS_NACL:
+        raise FalWebhookVerificationError("PyNaCl dependency missing")
 
     request_id = _required_header(headers, "X-Fal-Webhook-Request-Id")
     user_id = _required_header(headers, "X-Fal-Webhook-User-Id")

@@ -86,6 +86,18 @@ class _PendingFalJob:
     retries: int = 0
 
 
+@dataclass
+class CourseMaterial:
+    """Container for the pedagogical assets prepared for a video lesson."""
+
+    topic: str
+    keywords: list[str]
+    sources: dict[str, list[str]]
+    script: str
+    animation_prompt: str
+    errors: list[str]
+
+
 _pending_fal_jobs: dict[str, _PendingFalJob] = {}
 _pending_jobs_lock = Lock()
 _scheduler_started = False
@@ -196,20 +208,175 @@ def _clear_pending_fal_job(
                     _pending_fal_jobs.pop(key, None)
 
 
-def _finalize_fal_job_success(job_id: int, user_id: Any, video_url: str | None) -> None:
+def _coerce_mapping(value: object) -> dict[str, Any]:
+    """Convert Supabase JSON/text payloads into dictionaries."""
+
+    if isinstance(value, Mapping):
+        return dict(value)
+    if isinstance(value, str) and value:
+        try:
+            parsed = json.loads(value)
+        except Exception:
+            return {}
+        if isinstance(parsed, Mapping):
+            return dict(parsed)
+    return {}
+
+
+def _extract_video_details(payload: object) -> tuple[str | None, dict[str, Any]]:
+    """Return the first video URL and metadata found in *payload*."""
+
+    if isinstance(payload, Mapping):
+        video_entry = payload.get("video")
+        if isinstance(video_entry, Mapping):
+            url = _extract_video_url(video_entry)
+            metadata: dict[str, Any] = {}
+            for key in ("url", "content_type", "file_name", "file_size"):
+                value = video_entry.get(key)
+                if value is not None:
+                    metadata[key] = value
+            if url and "url" not in metadata:
+                metadata["url"] = url
+            if metadata:
+                return metadata.get("url"), metadata
+        elif isinstance(video_entry, str) and video_entry.strip():
+            clean = video_entry.strip()
+            return clean, {"url": clean}
+        for key in ("payload", "response", "data"):
+            url, meta = _extract_video_details(payload.get(key))
+            if url:
+                return url, meta
+        for key in ("url", "video_url", "signed_url"):
+            value = payload.get(key)
+            if isinstance(value, str) and value:
+                metadata = {"url": value}
+                for extra_key in ("content_type", "file_name", "file_size"):
+                    extra_val = payload.get(extra_key)
+                    if extra_val is not None:
+                        metadata[extra_key] = extra_val
+                return value, metadata
+        videos = payload.get("videos")
+        if isinstance(videos, Sequence) and not isinstance(videos, (str, bytes, bytearray)):
+            for item in videos:
+                url, meta = _extract_video_details(item)
+                if url:
+                    return url, meta
+    elif isinstance(payload, Sequence) and not isinstance(payload, (str, bytes, bytearray)):
+        for item in payload:
+            url, meta = _extract_video_details(item)
+            if url:
+                return url, meta
+    elif isinstance(payload, str) and payload:
+        clean = payload.strip()
+        if clean:
+            return clean, {"url": clean}
+    return None, {}
+
+
+def _video_title_from_params(job_row: Mapping[str, Any], params: Mapping[str, Any]) -> str:
+    """Derive a human friendly title for the generated video."""
+
+    course_material = params.get("course_material")
+    if isinstance(course_material, Mapping):
+        topic = course_material.get("topic")
+        if isinstance(topic, str) and topic.strip():
+            return f"{topic.strip()} (fal.ai)"
+    prompt = job_row.get("prompt")
+    if isinstance(prompt, str) and prompt.strip():
+        return prompt.strip()
+    return "Video (fal.ai)"
+
+
+def _finalize_fal_job_success(
+    job_row: Mapping[str, Any],
+    result_payload: object,
+) -> None:
     if supabase is None:
         return
-    if video_url:
-        supabase.table("videos").insert({
+
+    job_id = job_row.get("id")
+    if job_id is None:
+        return
+
+    user_id = job_row.get("user_id")
+    params_dict = _coerce_mapping(job_row.get("params"))
+    new_params = dict(params_dict)
+
+    existing_result = params_dict.get("fal_result")
+    result_section = dict(existing_result) if isinstance(existing_result, Mapping) else {}
+    existing_video_section = result_section.get("video")
+    if isinstance(existing_video_section, Mapping):
+        video_section: dict[str, Any] = dict(existing_video_section)
+    else:
+        video_section = {}
+
+    existing_video_url = video_section.get("url") if isinstance(video_section.get("url"), str) else None
+
+    video_url, video_metadata = _extract_video_details(result_payload)
+
+    params_changed = False
+
+    if isinstance(result_payload, Mapping):
+        if result_section.get("payload") != result_payload:
+            result_section["payload"] = result_payload
+            params_changed = True
+    elif result_payload is not None and result_section.get("payload") != result_payload:
+        result_section["payload"] = result_payload
+        params_changed = True
+
+    if video_metadata:
+        for key, value in video_metadata.items():
+            if video_section.get(key) != value:
+                video_section[key] = value
+                params_changed = True
+    elif video_url and "url" not in video_section:
+        video_section["url"] = video_url
+        params_changed = True
+
+    if video_section:
+        result_section["video"] = video_section
+    elif "video" in result_section and not video_section:
+        result_section.pop("video", None)
+
+    if result_section:
+        if new_params.get("fal_result") != result_section:
+            new_params["fal_result"] = result_section
+            params_changed = True
+    elif "fal_result" in new_params:
+        new_params.pop("fal_result", None)
+        params_changed = True
+
+    if params_changed:
+        try:
+            supabase.table("jobs").update({"params": new_params}).eq("id", job_id).execute()
+        except Exception as exc:  # pragma: no cover - Supabase optional logging
+            app.logger.debug("Unable to persist fal result for job %s: %s", job_id, exc)
+
+    final_video_url = (
+        video_section.get("url")
+        if isinstance(video_section.get("url"), str)
+        else video_url
+    )
+
+    if final_video_url and final_video_url != existing_video_url:
+        video_record = {
             "job_id": job_id,
             "user_id": user_id,
-            "title": "Video (fal.ai)",
-            "source_url": video_url,
-        }).execute()
-    supabase.table("jobs").update({
-        "status": "succeeded",
-        "finished_at": current_timestamp(),
-    }).eq("id", job_id).execute()
+            "title": _video_title_from_params(job_row, new_params),
+            "source_url": final_video_url,
+        }
+        try:
+            supabase.table("videos").insert(video_record).execute()
+        except Exception as exc:  # pragma: no cover - Supabase optional logging
+            app.logger.debug("Unable to insert video record for job %s: %s", job_id, exc)
+
+    try:
+        supabase.table("jobs").update({
+            "status": "succeeded",
+            "finished_at": current_timestamp(),
+        }).eq("id", job_id).execute()
+    except Exception as exc:  # pragma: no cover - Supabase optional logging
+        app.logger.debug("Unable to mark job %s as succeeded: %s", job_id, exc)
 
 
 def _mark_job_failed(job_id: int, *payloads: object) -> str:
@@ -242,7 +409,7 @@ def _process_pending_fal_jobs() -> None:
         try:
             job_res = (
                 supabase.table("jobs")
-                .select("id, user_id, status, params")
+                .select("id, user_id, status, params, prompt")
                 .eq("id", pending.job_id)
                 .limit(1)
                 .execute()
@@ -305,15 +472,8 @@ def _process_pending_fal_jobs() -> None:
                 )
                 continue
 
-            payload_candidate: object = result_payload
-            if isinstance(result_payload, Mapping):
-                nested_payload = result_payload.get("payload") or result_payload.get("response")
-                if isinstance(nested_payload, Mapping):
-                    payload_candidate = nested_payload
-
-            video_url = _extract_video_url(payload_candidate)
             try:
-                _finalize_fal_job_success(job["id"], job.get("user_id"), video_url)
+                _finalize_fal_job_success(job, result_payload)
             except Exception as exc:  # pragma: no cover - Supabase error logged
                 app.logger.exception(
                     "Queue watchdog failed to finalize job %s: %s", request_id, exc
@@ -469,13 +629,27 @@ def ollama_generate(prompt: str, model: str | None = None) -> str:
 
 def extract_keywords(text: str) -> list[str]:
     """Utilise Ollama pour extraire des mots clés importants d'un texte."""
-    prompt = (
-        "Extract a comma separated list of up to five important keywords from the"
-        f" following text:\n{text}\nKeywords:"
+
+    thinking_prompt = (
+        "You are an expert research assistant helping to design a lesson. Identify up to five key"
+        " concepts that someone must understand about the topic below. Think step-by-step and"
+        " briefly justify to yourself why each concept matters. After your reasoning, respond with"
+        " a single line that starts with 'Keywords:' followed only by the comma-separated"
+        " keywords."
+        f"\nTopic: {text}\nKeywords:"
     )
-    response = ollama_generate(prompt)
+    response = ollama_generate(thinking_prompt)
     if response:
-        keywords = [w.strip() for w in re.split(r"[,\n]", response) if w.strip()]
+        lines = response.splitlines()
+        keywords_line = ""
+        for line in reversed(lines):
+            match = re.search(r"keywords?\s*:?\s*(.+)", line, re.IGNORECASE)
+            if match:
+                keywords_line = match.group(1)
+                break
+        if not keywords_line:
+            keywords_line = response
+        keywords = [w.strip() for w in re.split(r"[,\n]", keywords_line) if w.strip()]
         if keywords:
             return keywords
     return re.findall(r"\b\w+\b", text)[:3]
@@ -567,7 +741,78 @@ def summarize_text(text: str, topic_hint: str | None = None) -> str:
     summary = ollama_generate(prompt)
     if summary:
         return summary
-    return text[:500]
+    fallback_topic = learner_request or topic_hint or "this topic"
+    fallback_topic = fallback_topic.strip() or "this topic"
+    return (
+        f"Hello! Today we're exploring {fallback_topic}. "
+        "First, we'll set the stage with the essential context. "
+        "Then we'll unpack two key ideas that bring the topic to life before closing with a quick recap "
+        "and encouragement to keep learning."
+    )
+
+
+def build_character_prompt(topic: str) -> str:
+    """Generate a fal.ai prompt describing the character delivering the course."""
+
+    clean_topic = topic.strip() if isinstance(topic, str) else ""
+    subject = clean_topic or "the lesson topic"
+    prompt = (
+        "You craft detailed prompts for a video generation model. Describe a single shot of a knowledgeable "
+        "professor or presenter who is looking straight ahead and enthusiastically explaining the topic below. "
+        "Mention the setting, posture, gestures, and mood in one or two sentences. Avoid camera jargon or on-screen "
+        "text and focus on the character's appearance and behaviour.\n"
+        f"Topic: {subject}\n"
+        "Character prompt:"
+    )
+    description = ollama_generate(prompt)
+    if description:
+        return description
+    return (
+        f"A warm professor stands facing the viewer in a softly lit classroom, gesturing with open hands as they explain {subject}."
+    )
+
+
+def prepare_course_material(query: str) -> CourseMaterial:
+    """Assemble keywords, references, script and prompt for a given learner query."""
+
+    base_topic = query.strip() if isinstance(query, str) else ""
+    keywords = extract_keywords(base_topic or query)
+    if not keywords:
+        fallback_term = base_topic or query
+        keywords = [fallback_term] if fallback_term else []
+
+    search_terms = keywords or ([base_topic] if base_topic else [])
+    if search_terms:
+        results, search_errors = wikipedia_search(search_terms)
+    else:
+        results, search_errors = ({}, {})
+
+    errors = [f"Search for '{kw}' failed: {msg}" for kw, msg in search_errors.items()]
+
+    texts: list[str] = []
+    for kw, links in results.items():
+        for url in links:
+            text, scrape_error = scrape_and_clean(url)
+            if text:
+                texts.append(text)
+            elif scrape_error:
+                errors.append(f"Scraping '{kw}' from {url} failed: {scrape_error}")
+
+    combined_text = " ".join(texts).strip()
+    reference_notes = combined_text or base_topic or query
+    summary = summarize_text(reference_notes or "", base_topic or query)
+    animation_prompt = build_character_prompt(base_topic or query)
+
+    topic_label = (base_topic or query or "").strip() or "General topic"
+
+    return CourseMaterial(
+        topic=topic_label,
+        keywords=keywords,
+        sources=results,
+        script=summary,
+        animation_prompt=animation_prompt,
+        errors=errors,
+    )
 
 
 # 🔑 Connexion Postgres (infos depuis Supabase -> Database -> Connection info)
@@ -916,34 +1161,18 @@ def wiki_summary():
     """Analyse le texte, recherche sur Wikipedia et retourne un résumé."""
     data = request.get_json(force=True)
     query = data.get("query", "")
-    keywords = extract_keywords(query)
-    results, search_errors = wikipedia_search(keywords)
-
-    texts: list[str] = []
-    error_messages = [
-        f"Search for '{kw}' failed: {msg}" for kw, msg in search_errors.items()
-    ]
-
-    for kw, links in results.items():
-        for url in links:
-            text, scrape_error = scrape_and_clean(url)
-            if text:
-                texts.append(text)
-            elif scrape_error:
-                error_messages.append(
-                    f"Scraping '{kw}' from {url} failed: {scrape_error}"
-                )
-
-    combined_text = " ".join(texts)
-    summary = summarize_text(combined_text, query) if combined_text else ""
+    material = prepare_course_material(query)
 
     payload: dict[str, object] = {
-        "keywords": keywords,
-        "results": results,
-        "summary": summary,
+        "topic": material.topic,
+        "keywords": material.keywords,
+        "results": material.sources,
+        "summary": material.script,
+        "video_script": material.script,
+        "animation_prompt": material.animation_prompt,
     }
-    if error_messages:
-        payload["errors"] = error_messages
+    if material.errors:
+        payload["errors"] = material.errors
 
     return jsonify(payload)
 
@@ -1009,13 +1238,16 @@ def fal_webhook():
         else:
             result_payload = payload
 
-    video_url = _extract_video_url(result_payload)
-
     if not request_id:
         return jsonify({"error": "missing request_id"}), 400
 
     try:
-        res = supabase.table("jobs").select("id, user_id").eq("external_job_id", request_id).execute()
+        res = (
+            supabase.table("jobs")
+            .select("id, user_id, params, prompt")
+            .eq("external_job_id", request_id)
+            .execute()
+        )
         if not res.data:
             return jsonify({"error": "job not found"}), 404
 
@@ -1029,17 +1261,7 @@ def fal_webhook():
         status_upper = (status or "").upper()
 
         if status_upper in {"SUCCESS", "OK", "COMPLETED"}:
-            if video_url:
-                supabase.table("videos").insert({
-                    "job_id": job_id,
-                    "user_id": user_id,
-                    "title": "Video (fal.ai)",
-                    "source_url": video_url
-                }).execute()
-            supabase.table("jobs").update({
-                "status": "succeeded",
-                "finished_at": current_timestamp(),
-            }).eq("id", job_id).execute()
+            _finalize_fal_job_success(job, result_payload)
             if request_id:
                 _clear_pending_fal_job(request_id, job_id=job_id)
             if gateway_request_id:
@@ -1101,21 +1323,6 @@ def submit_job_fal():
         if key in data and data[key] is not None:
             fal_input[key] = data[key]
 
-    if prompt and "prompt" not in fal_input:
-        fal_input["prompt"] = prompt
-
-    script_value = fal_input.get("text_input")
-    if isinstance(script_value, str):
-        stripped = script_value.strip()
-        if stripped:
-            fal_input["text_input"] = stripped
-        elif prompt:
-            fal_input["text_input"] = prompt
-    elif script_value is not None:
-        fal_input["text_input"] = str(script_value)
-    elif prompt:
-        fal_input["text_input"] = prompt
-
     defaults = {
         "voice": "Brian",
         "num_frames": 145,
@@ -1126,13 +1333,40 @@ def submit_job_fal():
     for key, value in defaults.items():
         fal_input.setdefault(key, value)
 
+    topic_source = data.get("text_input")
+    if not isinstance(topic_source, str):
+        topic_source = ""
+    course_material = prepare_course_material(topic_source or prompt or "")
+    fal_input["prompt"] = course_material.animation_prompt
+    fal_input["text_input"] = course_material.script
+
     fal_input = {k: v for k, v in fal_input.items() if v is not None}
+
+    course_payload: dict[str, object] = {
+        "topic": course_material.topic,
+        "keywords": course_material.keywords,
+        "sources": course_material.sources,
+        "summary": course_material.script,
+        "animation_prompt": course_material.animation_prompt,
+    }
+    if course_material.errors:
+        course_payload["errors"] = course_material.errors
+    if prompt:
+        course_payload["learner_prompt"] = prompt
+
+    params_payload: dict[str, object] = {
+        "model_id": model_id,
+        "fal_input": fal_input,
+        "course_material": course_payload,
+    }
+    if prompt and prompt != course_material.animation_prompt:
+        params_payload["original_prompt"] = prompt
 
     try:
         res = supabase.table("jobs").insert({
             "user_id": user_id,
-            "prompt": prompt,
-            "params": {"model_id": model_id, "fal_input": fal_input},
+            "prompt": course_material.animation_prompt,
+            "params": params_payload,
             "status": "queued",
             "provider": "fal"
         }).execute()
@@ -1173,6 +1407,7 @@ def submit_job_fal():
         "job_id": job_id,
         "external_job_id": external_id,
         "status": "queued",
+        "course_material": course_payload,
     }
     if webhook_url:
         payload["webhook_url"] = webhook_url
@@ -1248,7 +1483,7 @@ def _sync_fal_jobs():
         return
 
     try:
-        res = supabase.table("jobs").select("id, external_job_id, params, user_id")\
+        res = supabase.table("jobs").select("id, external_job_id, params, user_id, prompt")\
             .eq("provider", "fal")\
             .in_("status", ["queued", "running"])\
             .not_.is_("external_job_id", None)\
@@ -1283,13 +1518,7 @@ def _sync_fal_jobs():
 
             elif s in {"SUCCESS", "OK", "COMPLETED"}:
                 res = get_result(model_id, req_id)
-                payload_candidate: object = res
-                if isinstance(res, Mapping):
-                    nested_payload = res.get("payload") or res.get("response")
-                    if isinstance(nested_payload, Mapping):
-                        payload_candidate = nested_payload
-                video_url = _extract_video_url(payload_candidate)
-                _finalize_fal_job_success(job_id, user_id, video_url)
+                _finalize_fal_job_success(job, res)
                 _clear_pending_fal_job(req_id, job_id=job_id)
 
             elif s in {"FAILED", "ERROR", "CANCELLED"}:
