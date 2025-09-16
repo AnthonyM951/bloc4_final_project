@@ -42,7 +42,7 @@ if SUPABASE_URL and SUPABASE_KEY:
 
 
 DEFAULT_FAL_MODEL_ID = os.getenv(
-    "MODEL_DEFAULT", "fal-ai/infinitalk/single-text"
+    "MODEL_DEFAULT", "fal-ai/veo3/fast"
 )
 
 

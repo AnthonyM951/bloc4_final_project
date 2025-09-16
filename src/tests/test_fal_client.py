@@ -53,7 +53,7 @@ def anyio_backend():
 
 def test_submit_text2video_flattens_payload(capture_post):
     req_id = fal_client.submit_text2video(
-        "fal-ai/infinitalk/single-text",
+        "fal-ai/veo3/fast",
         {
             "prompt": "hello",
             "voice": "Brian",
@@ -73,7 +73,7 @@ def test_submit_text2video_flattens_payload(capture_post):
 
 def test_submit_text2video_accepts_string_input(capture_post):
     fal_client.submit_text2video(
-        "fal-ai/infinitalk/single-text",
+        "fal-ai/veo3/fast",
         "a smiling teacher",
     )
 
@@ -130,7 +130,7 @@ def test_get_status_with_logs(monkeypatch):
     monkeypatch.setattr(fal_client.requests, "get", fake_get)
 
     status = fal_client.get_status(
-        "fal-ai/infinitalk/single-text", "req-99", with_logs=True
+        "fal-ai/veo3/fast", "req-99", with_logs=True
     )
 
     assert captured["params"] == {"logs": "true"}
