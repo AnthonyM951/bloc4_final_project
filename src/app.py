@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import re
 from dataclasses import dataclass
@@ -74,6 +75,23 @@ app.secret_key = os.getenv("FLASK_SECRET", "dev-secret-change-me")
 app.config["JSONIFY_PRETTYPRINT_REGULAR"] = False
 
 MODEL_DEFAULT = os.getenv("MODEL_DEFAULT")
+
+
+def _env_float(name: str, default: float) -> float:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    try:
+        parsed = float(raw_value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(parsed) or parsed <= 0:
+        return default
+    return parsed
+
+
+FAL_RESULT_POLL_INTERVAL = _env_float("FAL_RESULT_POLL_INTERVAL", 5.0)
+FAL_RESULT_TIMEOUT = _env_float("FAL_RESULT_TIMEOUT", 600.0)
 
 @dataclass
 class CourseMaterial:
@@ -425,13 +443,32 @@ def _poll_fal_job(job_id: str, request_id: str, model_id: str) -> None:
 
     success_states = {"SUCCESS", "COMPLETED", "OK"}
     failure_states = {"FAILED", "ERROR", "CANCELLED"}
-    running_states = {"PENDING", "QUEUED", "RUNNING", "IN_PROGRESS", "PROCESSING"}
+    running_states = {
+        "PENDING",
+        "QUEUED",
+        "RUNNING",
+        "IN_PROGRESS",
+        "PROCESSING",
+        "STARTED",
+    }
     transient_status_codes = {202, 425}
+    poll_interval = FAL_RESULT_POLL_INTERVAL
+    deadline = time() + FAL_RESULT_TIMEOUT
 
     consecutive_errors = 0
     last_status_token: str | None = None
 
     while True:
+        if time() >= deadline:
+            app.logger.error(
+                "fal.ai job %s (request=%s) timed out waiting for video result",
+                job_identifier,
+                request_identifier,
+            )
+            _mark_job_failed(
+                job_identifier, "Timed out waiting for fal.ai video result"
+            )
+            return
         try:
             result_payload = get_result(model_identifier, request_identifier)
         except requests_exceptions.HTTPError as exc:
@@ -471,7 +508,7 @@ def _poll_fal_job(job_id: str, request_id: str, model_id: str) -> None:
                             status_code,
                         )
                         last_status_token = token
-                sleep(5)
+                sleep(poll_interval)
                 continue
 
             consecutive_errors += 1
@@ -484,7 +521,7 @@ def _poll_fal_job(job_id: str, request_id: str, model_id: str) -> None:
             if consecutive_errors >= 3:
                 _mark_job_failed(job_identifier, str(exc))
                 return
-            sleep(5)
+            sleep(poll_interval)
             continue
         except Exception as exc:
             consecutive_errors += 1
@@ -497,12 +534,14 @@ def _poll_fal_job(job_id: str, request_id: str, model_id: str) -> None:
             if consecutive_errors >= 3:
                 _mark_job_failed(job_identifier, str(exc))
                 return
-            sleep(5)
+            sleep(poll_interval)
             continue
 
         consecutive_errors = 0
         status_label = _extract_status_label(result_payload)
         status_upper = status_label.upper() if isinstance(status_label, str) else ""
+        video_url_candidate, _ = _extract_video_details(result_payload)
+        has_video = isinstance(video_url_candidate, str) and video_url_candidate.strip()
 
         if status_upper:
             token = f"STATUS:{status_upper}"
@@ -527,13 +566,25 @@ def _poll_fal_job(job_id: str, request_id: str, model_id: str) -> None:
             _mark_job_failed(job_identifier, result_payload)
             return
 
-        if status_upper in running_states and status_upper not in success_states:
-            sleep(5)
+        if has_video:
+            job_row = _load_job_row(job_identifier) or job_row
+            _finalize_fal_job_success(job_row, result_payload)
+            return
+
+        if status_upper in running_states:
+            sleep(poll_interval)
             continue
 
-        job_row = _load_job_row(job_identifier) or job_row
-        _finalize_fal_job_success(job_row, result_payload)
-        return
+        if status_upper in success_states:
+            app.logger.info(
+                "fal.ai job %s (request=%s) reported success but no video yet; retrying",
+                job_identifier,
+                request_identifier,
+            )
+            sleep(poll_interval)
+            continue
+
+        sleep(poll_interval)
 
 
 def _extract_video_details(payload: object) -> tuple[str | None, dict[str, Any]]:

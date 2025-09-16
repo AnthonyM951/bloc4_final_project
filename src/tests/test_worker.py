@@ -1,6 +1,8 @@
 import os
 import sys
 
+import pytest
+
 # Ajoute le répertoire parent au PYTHONPATH pour importer worker
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 sys.path.insert(0, os.path.dirname(__file__))
@@ -92,3 +94,108 @@ def test_process_video_job_inserts_file(monkeypatch):
     assert submitted["args"] == ("fal-ai/infinitalk/single-text",)
     assert submitted["kwargs"]["arguments"] == fal_input_payload
     assert result_calls == [("fal-ai/infinitalk/single-text", "abc123")]
+
+
+def _queue_single_job(dummy_supabase, fal_input_payload):
+    dummy_supabase.queue_select(
+        "jobs",
+        [
+            {
+                "id": "job-1",
+                "user_id": 7,
+                "prompt": fal_input_payload["prompt"],
+                "params": {
+                    "model_id": "fal-ai/infinitalk/single-text",
+                    "fal_input": fal_input_payload,
+                },
+            }
+        ],
+    )
+
+
+def _default_fal_payload():
+    return {
+        "prompt": "A warm professor stands facing the viewer in a softly lit classroom, gesturing with open hands as they explain the lesson.",
+        "text_input": "Hello! Today we're exploring a fascinating topic together.",
+        "image_url": "https://example.com/image.jpg",
+        "voice": "Brian",
+        "num_frames": 145,
+        "resolution": "480p",
+        "seed": 42,
+        "acceleration": "high",
+        "webhook_url": "https://example.com/webhooks/fal",
+    }
+
+
+def _stub_submit(monkeypatch, worker_module, submitted_store):
+    class DummyHandle:
+        request_id = "abc123"
+
+    def fake_submit(*args, **kwargs):
+        submitted_store["args"] = args
+        submitted_store["kwargs"] = kwargs
+        return DummyHandle()
+
+    monkeypatch.setattr(worker_module.fal_client, "submit", fake_submit)
+
+
+def test_process_video_job_waits_until_video_ready(monkeypatch):
+    submitted: dict[str, object] = {}
+    dummy_supabase = DummySupabase()
+    fal_input_payload = _default_fal_payload()
+    _queue_single_job(dummy_supabase, fal_input_payload)
+
+    payloads = iter(
+        [
+            {"status": "RUNNING"},
+            {"status": "SUCCESS", "video": {"url": "http://example.com/video.mp4"}},
+        ]
+    )
+    call_count = 0
+
+    def fake_result(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        try:
+            return next(payloads)
+        except StopIteration:  # pragma: no cover - defensive
+            pytest.fail("fal_client.result called too many times")
+
+    monkeypatch.setattr(worker_module, "supabase", dummy_supabase)
+    _stub_submit(monkeypatch, worker_module, submitted)
+    monkeypatch.setattr(worker_module.fal_client, "result", fake_result)
+    monkeypatch.setattr(worker_module, "sleep", lambda *_: None)
+    monkeypatch.setattr(worker_module, "MAX_RESULT_ATTEMPTS", 5)
+
+    worker_module.process_video_job("job-1")
+
+    assert call_count == 2
+    updates = [rec for rec in dummy_supabase.records if rec.op == "update" and rec.table == "jobs"]
+    assert any(rec.payload.get("status") == "succeeded" for rec in updates)
+
+
+def test_process_video_job_times_out_without_video(monkeypatch):
+    submitted: dict[str, object] = {}
+    dummy_supabase = DummySupabase()
+    fal_input_payload = _default_fal_payload()
+    _queue_single_job(dummy_supabase, fal_input_payload)
+
+    call_count = 0
+
+    def fake_result(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return {"status": "SUCCESS"}
+
+    monkeypatch.setattr(worker_module, "supabase", dummy_supabase)
+    _stub_submit(monkeypatch, worker_module, submitted)
+    monkeypatch.setattr(worker_module.fal_client, "result", fake_result)
+    monkeypatch.setattr(worker_module, "sleep", lambda *_: None)
+    monkeypatch.setattr(worker_module, "MAX_RESULT_ATTEMPTS", 3)
+
+    with pytest.raises(RuntimeError, match="Timed out waiting for fal.ai video result"):
+        worker_module.process_video_job("job-1")
+
+    assert call_count == 3
+    updates = [rec for rec in dummy_supabase.records if rec.op == "update" and rec.table == "jobs"]
+    assert any(rec.payload.get("status") == "failed" for rec in updates)
