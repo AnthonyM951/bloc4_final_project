@@ -40,7 +40,7 @@ app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET", "dev-secret-change-me")
 app.config["JSONIFY_PRETTYPRINT_REGULAR"] = False
 
-MODEL_DEFAULT = os.getenv("MODEL_DEFAULT") or os.getenv("FAL_MODEL", "fal-ai/veo3")
+MODEL_DEFAULT = os.getenv("MODEL_DEFAULT")
 
 scheduler = BackgroundScheduler(daemon=True)
 
