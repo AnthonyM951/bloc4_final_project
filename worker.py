@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
@@ -42,6 +43,26 @@ if SUPABASE_URL and SUPABASE_KEY:
 
 DEFAULT_FAL_MODEL_ID = os.getenv(
     "MODEL_DEFAULT", "fal-ai/infinitalk/single-text"
+)
+
+
+def _env_float(name: str, default: float) -> float:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    try:
+        parsed = float(raw_value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(parsed) or parsed <= 0:
+        return default
+    return parsed
+
+
+FAL_RESULT_POLL_INTERVAL = _env_float("FAL_RESULT_POLL_INTERVAL", 5.0)
+FAL_RESULT_TIMEOUT = _env_float("FAL_RESULT_TIMEOUT", 600.0)
+MAX_RESULT_ATTEMPTS = max(
+    1, int(math.ceil(FAL_RESULT_TIMEOUT / FAL_RESULT_POLL_INTERVAL))
 )
 
 
@@ -271,6 +292,14 @@ def process_video_job(job_id: str | int) -> None:
 
     success_states = {"SUCCESS", "SUCCEEDED", "COMPLETED", "DONE", "OK"}
     failure_states = {"FAILED", "ERROR", "CANCELLED", "CANCELED"}
+    running_states = {
+        "PENDING",
+        "QUEUED",
+        "RUNNING",
+        "IN_PROGRESS",
+        "PROCESSING",
+        "STARTED",
+    }
     transient_status_codes = {202, 425}
 
     attempts = 0
@@ -278,7 +307,7 @@ def process_video_job(job_id: str | int) -> None:
     response: dict[str, Any] | None = None
     fal_video_payload: dict[str, Any] | None = None
 
-    while attempts < 60:
+    while attempts < MAX_RESULT_ATTEMPTS:
         attempts += 1
         try:
             response = fal_client.result(fal_model_id, request_id)
@@ -287,20 +316,20 @@ def process_video_job(job_id: str | int) -> None:
             status_code = getattr(response_obj, "status_code", None)
             if status_code in transient_status_codes:
                 consecutive_errors = 0
-                sleep(5)
+                sleep(FAL_RESULT_POLL_INTERVAL)
                 continue
             consecutive_errors += 1
             if consecutive_errors >= 3:
                 _update_job(job_id, {"status": "failed", "error": str(exc)})
                 raise
-            sleep(5)
+            sleep(FAL_RESULT_POLL_INTERVAL)
             continue
         except Exception as exc:
             consecutive_errors += 1
             if consecutive_errors >= 3:
                 _update_job(job_id, {"status": "failed", "error": str(exc)})
                 raise
-            sleep(5)
+            sleep(FAL_RESULT_POLL_INTERVAL)
             continue
 
         consecutive_errors = 0
@@ -315,18 +344,39 @@ def process_video_job(job_id: str | int) -> None:
             raise RuntimeError(error_message)
 
         fal_video_payload = _extract_video_payload(response)
-        if fal_video_payload and isinstance(fal_video_payload.get("url"), str):
+        video_url_value = None
+        if isinstance(fal_video_payload, dict):
+            url_candidate = fal_video_payload.get("url")
+            if isinstance(url_candidate, str) and url_candidate.strip():
+                video_url_value = url_candidate.strip()
+
+        if video_url_value:
+            fal_video_payload["url"] = video_url_value
             break
 
-        if status_upper and status_upper not in success_states:
-            sleep(5)
+        if status_upper in running_states:
+            sleep(FAL_RESULT_POLL_INTERVAL)
             continue
 
-        # Statut de succès mais pas de vidéo → on sort pour signaler l'erreur.
-        break
+        if status_upper in success_states:
+            sleep(FAL_RESULT_POLL_INTERVAL)
+            continue
 
+        if status_upper:
+            sleep(FAL_RESULT_POLL_INTERVAL)
+            continue
+
+        sleep(FAL_RESULT_POLL_INTERVAL)
+        continue
+
+    timed_out = attempts >= MAX_RESULT_ATTEMPTS and (
+        not fal_video_payload or not isinstance(fal_video_payload.get("url"), str)
+    )
     if not fal_video_payload or not isinstance(fal_video_payload.get("url"), str):
-        message = "fal.ai video result not available"
+        if timed_out:
+            message = "Timed out waiting for fal.ai video result"
+        else:
+            message = "fal.ai video result not available"
         _update_job(job_id, {"status": "failed", "error": message})
         raise RuntimeError(message)
 
