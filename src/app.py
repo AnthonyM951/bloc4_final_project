@@ -23,7 +23,7 @@ from prometheus_client import (
     Gauge,
     generate_latest,
 )
-from supabase import Client, create_client
+from supabase import create_client
 import requests
 from bs4 import BeautifulSoup
 
@@ -210,18 +210,18 @@ def summarize_text(text: str) -> str:
 
 # 🔑 Client Supabase pour Auth
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = (
-    os.getenv("SUPABASE_SERVICE_KEY")
-    or os.getenv("SUPABASE_KEY")
-    or os.getenv("SUPABASE_ANON_KEY")
-)
-supabase: Client | None = None
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
+# supabase: Client | None = None
 supabase_connected = False
 if SUPABASE_URL and SUPABASE_KEY:
+    print(SUPABASE_KEY)
     try:
         supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
         # Vérifie la connexion en faisant une requête simple
-        supabase.table("profiles").select("user_id").limit(1).execute()
+        # supabase.table("profiles").select("user_id").limit(1).execute()
+        res = supabase.table("profiles").select("*").limit(1).execute()
+        print("✅ Success:", res)
         supabase_connected = True
     except Exception as e:
         print("Erreur supabase connection:", e)

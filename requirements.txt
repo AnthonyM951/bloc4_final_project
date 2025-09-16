@@ -3,7 +3,7 @@ Werkzeug<3
 SQLAlchemy==2.0.23
 psycopg2-binary==2.9.9
 python-dotenv==1.0.1
-supabase==2.3.1
+supabase==2.8.1
 celery==5.3.6
 fal-client==0.7.0
 APScheduler==3.10.4
