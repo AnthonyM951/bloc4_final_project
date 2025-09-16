@@ -28,6 +28,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from fal_client import get_result, get_status, submit_text2video
+from fal_webhook import FalWebhookVerificationError, verify_fal_webhook
 
 try:  # pragma: no cover
     from worker import process_video_job  # type: ignore
@@ -41,6 +42,12 @@ app.secret_key = os.getenv("FLASK_SECRET", "dev-secret-change-me")
 app.config["JSONIFY_PRETTYPRINT_REGULAR"] = False
 
 MODEL_DEFAULT = os.getenv("MODEL_DEFAULT")
+
+VERIFY_FAL_WEBHOOKS = os.getenv("FAL_VERIFY_WEBHOOKS", "1").lower() not in {
+    "0",
+    "false",
+    "no",
+}
 
 scheduler = BackgroundScheduler(daemon=True)
 
@@ -614,10 +621,42 @@ def fal_webhook():
     if supabase is None:
         return jsonify({"error": "Supabase not available"}), 500
 
-    payload = request.get_json(force=True)
+    raw_body = request.get_data(cache=True) or b""
+    if VERIFY_FAL_WEBHOOKS:
+        try:
+            verify_fal_webhook(request.headers, raw_body)
+        except FalWebhookVerificationError as exc:
+            return jsonify({"error": f"invalid webhook: {exc}"}), 400
+
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "invalid payload"}), 400
+
     request_id = payload.get("request_id") or payload.get("id")
     status = payload.get("status")
-    video_url = (payload.get("video") or {}).get("url")
+    gateway_request_id = payload.get("gateway_request_id")
+
+    result_payload = payload.get("payload")
+    if not isinstance(result_payload, dict):
+        result_payload = payload
+
+    video_url: str | None = None
+    video_info = result_payload.get("video")
+    if isinstance(video_info, dict):
+        video_url = video_info.get("url") or video_info.get("signed_url")
+    elif isinstance(video_info, str):
+        video_url = video_info
+    if not video_url:
+        alt_video = result_payload.get("video_url")
+        if isinstance(alt_video, str):
+            video_url = alt_video
+        else:
+            videos_list = result_payload.get("videos")
+            if isinstance(videos_list, list):
+                for item in videos_list:
+                    if isinstance(item, dict) and isinstance(item.get("url"), str):
+                        video_url = item["url"]
+                        break
 
     if not request_id:
         return jsonify({"error": "missing request_id"}), 400
@@ -631,23 +670,35 @@ def fal_webhook():
         job_id = job["id"]
         user_id = job["user_id"]
 
-        if status == "SUCCESS":
-            # Crée une entrée dans la table videos
-            supabase.table("videos").insert({
-                "job_id": job_id,
-                "user_id": user_id,
-                "title": "Video (fal.ai)",
-                "source_url": video_url
-            }).execute()
+        if gateway_request_id and gateway_request_id != request_id:
+            supabase.table("jobs").update({"external_job_id": gateway_request_id}).eq("id", job_id).execute()
+
+        status_upper = (status or "").upper()
+
+        if status_upper in {"SUCCESS", "OK"}:
+            if video_url:
+                supabase.table("videos").insert({
+                    "job_id": job_id,
+                    "user_id": user_id,
+                    "title": "Video (fal.ai)",
+                    "source_url": video_url
+                }).execute()
             supabase.table("jobs").update({
                 "status": "succeeded",
-                "finished_at": current_timestamp()
+                "finished_at": current_timestamp(),
             }).eq("id", job_id).execute()
 
-        elif status in ("FAILED", "ERROR"):
+        elif status_upper in {"FAILED", "ERROR"}:
+            error_detail = payload.get("error")
+            if not error_detail and isinstance(result_payload, dict):
+                detail = result_payload.get("detail")
+                if isinstance(detail, str):
+                    error_detail = detail
+                elif isinstance(detail, list) and detail:
+                    error_detail = str(detail[0])
             supabase.table("jobs").update({
                 "status": "failed",
-                "error": payload.get("error") or "fal error"
+                "error": error_detail or "fal error"
             }).eq("id", job_id).execute()
 
         else:
@@ -727,13 +778,29 @@ def submit_job_fal():
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
+    webhook_override = os.getenv("FAL_WEBHOOK_URL")
+    webhook_url = webhook_override
+    if not webhook_url:
+        try:
+            webhook_url = url_for("fal_webhook", _external=True)
+        except RuntimeError:
+            webhook_url = None
+
     try:
-        external_id = submit_text2video(model_id, fal_input, webhook_url=None)
+        external_id = submit_text2video(model_id, fal_input, webhook_url=webhook_url)
         supabase.table("jobs").update({"external_job_id": external_id}).eq("id", job_id).execute()
     except Exception as e:
         return jsonify({"error": f"Fal submission failed: {e}"}), 502
 
-    return jsonify({"job_id": job_id, "external_job_id": external_id, "status": "queued"}), 202
+    payload = {
+        "job_id": job_id,
+        "external_job_id": external_id,
+        "status": "queued",
+    }
+    if webhook_url:
+        payload["webhook_url"] = webhook_url
+
+    return jsonify(payload), 202
 
 
 
@@ -825,27 +892,48 @@ def _sync_fal_jobs():
             st = get_status(model_id, req_id)
             s = (st.get("status") or "").upper()
 
-            if s in ("QUEUED", "IN_PROGRESS"):
+            if s in ("QUEUED", "IN_PROGRESS", "PROCESSING"):
                 supabase.table("jobs").update({
                     "status": "running",
                     "started_at": current_timestamp()
                 }).eq("id", job_id).execute()
 
-            elif s == "SUCCESS":
+            elif s in ("SUCCESS", "OK"):
                 res = get_result(model_id, req_id)
-                video_url = (res.get("video") or {}).get("url")
-                supabase.table("videos").insert({
-                    "job_id": job_id,
-                    "user_id": user_id,
-                    "title": "Video (fal.ai)",
-                    "source_url": video_url
-                }).execute()
+                result_payload = res.get("payload") if isinstance(res.get("payload"), dict) else res
+                video_url = None
+                if isinstance(result_payload, dict):
+                    video_section = result_payload.get("video")
+                    if isinstance(video_section, dict):
+                        video_url = video_section.get("url") or video_section.get("signed_url")
+                    elif isinstance(video_section, str):
+                        video_url = video_section
+                    if not video_url:
+                        alt_url = result_payload.get("video_url")
+                        if isinstance(alt_url, str):
+                            video_url = alt_url
+                        else:
+                            videos_list = result_payload.get("videos")
+                            if isinstance(videos_list, list):
+                                for item in videos_list:
+                                    if isinstance(item, dict) and isinstance(item.get("url"), str):
+                                        video_url = item["url"]
+                                        break
+                if not video_url and isinstance(res.get("video"), dict):
+                    video_url = res["video"].get("url")
+                if video_url:
+                    supabase.table("videos").insert({
+                        "job_id": job_id,
+                        "user_id": user_id,
+                        "title": "Video (fal.ai)",
+                        "source_url": video_url
+                    }).execute()
                 supabase.table("jobs").update({
                     "status": "succeeded",
                     "finished_at": current_timestamp()
                 }).eq("id", job_id).execute()
 
-            elif s in ("FAILED", "ERROR"):
+            elif s in ("FAILED", "ERROR", "CANCELLED"):
                 supabase.table("jobs").update({
                     "status": "failed",
                     "error": st.get("error") or "fal error"

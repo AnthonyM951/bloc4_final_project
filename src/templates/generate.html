@@ -3,32 +3,135 @@
 {% block content %}
 <div class="max-w-2xl mx-auto space-y-6">
   <h1 class="text-3xl font-semibold text-center">Generate Video</h1>
+  <p class="text-sm text-slate-400 text-center">
+    Submit a prompt to schedule a fal.ai video generation request. The job is queued on
+    fal.ai and this page monitors the status using your Supabase records and webhooks.
+  </p>
   <form id="gen-form" class="space-y-4">
     <input id="prompt" class="w-full px-4 py-2 rounded bg-slate-900 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-teal-500" type="text" placeholder="Enter prompt" required />
     <input id="image-url" class="w-full px-4 py-2 rounded bg-slate-900 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-teal-500" type="text" placeholder="Image URL" required />
     <button class="w-full py-2 rounded bg-teal-500 hover:bg-teal-400 text-slate-900 font-semibold" type="submit">Generate</button>
     <button id="wiki-btn" class="w-full py-2 rounded bg-indigo-500 hover:bg-indigo-400 text-slate-900 font-semibold" type="button">Wiki Search</button>
   </form>
+  <section class="p-4 rounded-lg border border-slate-700 bg-slate-900/50 space-y-2">
+    <h2 class="text-sm font-semibold text-slate-200">fal.ai request status</h2>
+    <p id="request-state" class="text-xs text-slate-400">No request submitted yet.</p>
+    <dl id="request-meta" class="grid grid-cols-1 gap-1 text-xs text-slate-400 hidden">
+      <div class="flex items-center justify-between gap-2">
+        <dt class="font-medium text-slate-300">Request ID</dt>
+        <dd id="request-id" class="text-right break-all"></dd>
+      </div>
+      <div class="flex items-center justify-between gap-2">
+        <dt class="font-medium text-slate-300">Webhook URL</dt>
+        <dd id="webhook-url" class="text-right break-all"></dd>
+      </div>
+    </dl>
+  </section>
   <pre id="result" class="bg-slate-900 p-4 rounded text-sm"></pre>
   <pre id="wiki-result" class="bg-slate-900 p-4 rounded text-sm"></pre>
 </div>
 <script>
 const USER_ID = {{ user_id | tojson }};
+const requestState = document.getElementById('request-state');
+const requestMeta = document.getElementById('request-meta');
+const requestIdEl = document.getElementById('request-id');
+const webhookEl = document.getElementById('webhook-url');
+let pollTimeout = null;
+
+function setState(message, tone = 'info') {
+  if (!requestState) return;
+  const classes = {
+    info: 'text-xs text-slate-300',
+    active: 'text-xs text-amber-300',
+    success: 'text-xs text-emerald-300',
+    error: 'text-xs text-red-300'
+  };
+  requestState.className = classes[tone] || classes.info;
+  requestState.textContent = message;
+}
+
+function updateRequestMeta(data) {
+  if (!requestMeta) return;
+  if (!data) {
+    requestMeta.classList.add('hidden');
+    requestIdEl.textContent = '';
+    webhookEl.textContent = '';
+    return;
+  }
+  requestMeta.classList.remove('hidden');
+  requestIdEl.textContent = data.external_job_id || '—';
+  webhookEl.textContent = data.webhook_url || '—';
+}
+
+async function pollJobStatus(jobId) {
+  if (pollTimeout) {
+    clearTimeout(pollTimeout);
+    pollTimeout = null;
+  }
+  if (!jobId) return;
+
+  const poll = async () => {
+    try {
+      const resp = await fetch(`/list_jobs/${USER_ID}`);
+      if (!resp.ok) {
+        throw new Error(`HTTP ${resp.status}`);
+      }
+      const jobs = await resp.json();
+      const job = Array.isArray(jobs) ? jobs.find((item) => item.id === jobId) : null;
+      if (!job) {
+        setState('Waiting for job to appear in Supabase…', 'active');
+      } else if (job.status === 'succeeded') {
+        setState('✅ Video generated successfully! Check your library for the file.', 'success');
+        return;
+      } else if (job.status === 'failed') {
+        const reason = job.error ? ` Reason: ${job.error}` : '';
+        setState(`The request failed.${reason}`, 'error');
+        return;
+      } else {
+        const statusLabel = job.status === 'running' ? 'Processing' : 'Queued';
+        setState(`${statusLabel}… waiting for fal.ai webhook.`, 'active');
+      }
+    } catch (err) {
+      setState(`Unable to fetch job status: ${err.message}`, 'error');
+      return;
+    }
+    pollTimeout = setTimeout(poll, 4000);
+  };
+  poll();
+}
+
 document.getElementById('gen-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const prompt = document.getElementById('prompt').value;
   const imageUrl = document.getElementById('image-url').value;
-  const res = await fetch('/submit_job', {
+  setState('Submitting job to fal.ai…', 'active');
+  const res = await fetch('/submit_job_fal', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({
       user_id: USER_ID,
       prompt,
-      params: { image_url: imageUrl }
+      text_input: prompt,
+      image_url: imageUrl
     })
   });
-  const data = await res.json();
+  let data;
+  try {
+    data = await res.json();
+  } catch (err) {
+    setState('Failed to parse response from the server.', 'error');
+    return;
+  }
   document.getElementById('result').textContent = JSON.stringify(data, null, 2);
+  if (!res.ok) {
+    const errorMsg = data && data.error ? data.error : 'The fal.ai submission failed.';
+    setState(errorMsg, 'error');
+    updateRequestMeta(null);
+    return;
+  }
+  updateRequestMeta(data);
+  setState('Job queued at fal.ai. Waiting for status updates…', 'active');
+  pollJobStatus(data.job_id);
 });
 
 document.getElementById('wiki-btn').addEventListener('click', async () => {
