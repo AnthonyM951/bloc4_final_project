@@ -35,11 +35,8 @@ def _normalize_input(input_data: str | Mapping[str, Any]) -> dict[str, Any]:
 def submit_text2video(
     model_id: str,
     input_data: str | Mapping[str, Any],
-    webhook_url: str | None = None,
 ) -> str:
     payload: dict[str, object] = _normalize_input(input_data)
-    if webhook_url:
-        payload.setdefault("webhook_url", webhook_url)
     endpoint = f"{FAL_QUEUE_BASE.rstrip('/')}/{model_id.lstrip('/')}"
     r = requests.post(
         endpoint,
@@ -226,11 +223,10 @@ async def result_async(model_id: str, request_id: str) -> dict:
 
 # Backwards compatibility helpers used by worker.py tests
 def submit(model_id: str, arguments: dict):  # pragma: no cover - simple wrapper
-    webhook_url = arguments.get("webhook_url")
     input_args = arguments.get("input")
     if input_args is None:
         input_args = {k: v for k, v in arguments.items() if k != "webhook_url"}
-    req_id = submit_text2video(model_id, input_args, webhook_url)
+    req_id = submit_text2video(model_id, input_args)
     return type("Handle", (), {"request_id": req_id})()
 
 
