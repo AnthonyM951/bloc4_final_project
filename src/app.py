@@ -48,7 +48,18 @@ def debug_log(func):
             print(f"        kwargs={kwargs}")
         try:
             result = func(*args, **kwargs)
-            print(f"[DEBUG] <<< {func.__name__} returned {type(result)}")
+            if isinstance(result, Mapping):
+                try:
+                    serialized = json.dumps(
+                        result, ensure_ascii=False, indent=2, sort_keys=True
+                    )
+                except TypeError:
+                    serialized = repr(result)
+                print(
+                    f"[DEBUG] <<< {func.__name__} returned dict:\n{serialized}"
+                )
+            else:
+                print(f"[DEBUG] <<< {func.__name__} returned {type(result)}")
             return result
         except Exception as e:
             print(f"[DEBUG] !!! {func.__name__} raised {e}")
