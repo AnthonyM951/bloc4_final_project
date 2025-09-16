@@ -309,3 +309,37 @@ def test_check_ollama_connection_handles_errors(monkeypatch):
 
     monkeypatch.setattr(app_module.requests, "get", _raise)
     assert app_module.check_ollama_connection() is False
+
+
+def test_list_jobs_includes_video_url(monkeypatch):
+    client = app.test_client()
+    dummy_supabase = DummySupabase()
+    dummy_supabase.queue_select(
+        "jobs",
+        [
+            {
+                "id": 1,
+                "user_id": "user-123",
+                "status": "succeeded",
+                "params": {"fal_result": {"video": {"url": "https://fallback"}}},
+            }
+        ],
+    )
+    dummy_supabase.queue_select(
+        "videos",
+        [
+            {
+                "job_id": 1,
+                "source_url": "https://cdn.example.com/video.mp4",
+            }
+        ],
+    )
+    monkeypatch.setattr(app_module, "supabase", dummy_supabase)
+
+    resp = client.get("/list_jobs/user-123")
+
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert isinstance(payload, list)
+    assert payload
+    assert payload[0]["video_url"] == "https://cdn.example.com/video.mp4"
