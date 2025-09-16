@@ -1,6 +1,6 @@
 import asyncio
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import requests
@@ -76,10 +76,152 @@ def get_result(model_id: str, request_id: str) -> dict:
     return r.json()
 
 
+def _is_sequence(value: object) -> bool:
+    return isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray))
+
+
+def _first_string(payload: Mapping[str, Any], keys: Sequence[str]) -> str | None:
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped:
+                return stripped
+    return None
+
+
+def _first_int(payload: Mapping[str, Any], keys: Sequence[str]) -> int | None:
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            return int(value)
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                continue
+            try:
+                return int(stripped)
+            except ValueError:
+                try:
+                    return int(float(stripped))
+                except ValueError:
+                    continue
+    return None
+
+
+def _merge_video_metadata(
+    base: Mapping[str, Any] | None, extra: Mapping[str, Any] | None
+) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    if isinstance(base, Mapping):
+        merged.update(base)
+    if isinstance(extra, Mapping):
+        for key in ("url", "content_type", "file_name", "file_size"):
+            value = extra.get(key)
+            if value is not None and key not in merged:
+                merged[key] = value
+    return merged
+
+
+def _extract_video_metadata(payload: object) -> dict[str, Any] | None:
+    if isinstance(payload, Mapping):
+        direct: dict[str, Any] = {}
+        url = _first_string(
+            payload, ["url", "signed_url", "video_url", "source_url"]
+        )
+        if not url:
+            video_value = payload.get("video")
+            if isinstance(video_value, str):
+                stripped = video_value.strip()
+                if stripped:
+                    url = stripped
+        if url:
+            direct["url"] = url
+
+        content_type = _first_string(payload, ["content_type", "mime_type", "type"])
+        if content_type:
+            direct["content_type"] = content_type
+
+        file_name = _first_string(payload, ["file_name", "filename", "name"])
+        if file_name:
+            direct["file_name"] = file_name
+
+        file_size = _first_int(payload, ["file_size", "size", "bytes", "length"])
+        if file_size is not None:
+            direct["file_size"] = file_size
+
+        nested_candidates: list[object] = []
+        for key in ("video", "payload", "response", "result", "data"):
+            if key in payload:
+                nested_candidates.append(payload[key])
+        for key in ("videos", "outputs", "output", "resources", "items", "files", "assets"):
+            if key in payload:
+                nested_candidates.append(payload[key])
+
+        for nested in nested_candidates:
+            nested_meta = _extract_video_metadata(nested)
+            if nested_meta:
+                return _merge_video_metadata(nested_meta, direct)
+
+        if direct:
+            return direct
+
+    elif _is_sequence(payload):
+        for item in payload:
+            nested_meta = _extract_video_metadata(item)
+            if nested_meta:
+                return nested_meta
+
+    elif isinstance(payload, str):
+        stripped = payload.strip()
+        if stripped:
+            return {"url": stripped}
+
+    return None
+
+
+def _extract_seed(payload: object) -> int | None:
+    if isinstance(payload, Mapping):
+        seed = _first_int(payload, ["seed", "random_seed", "seed_used"])
+        if seed is not None:
+            return seed
+        for key in ("payload", "response", "result", "data", "meta", "metadata"):
+            if key in payload:
+                nested_seed = _extract_seed(payload[key])
+                if nested_seed is not None:
+                    return nested_seed
+    elif _is_sequence(payload):
+        for item in payload:
+            nested_seed = _extract_seed(item)
+            if nested_seed is not None:
+                return nested_seed
+    return None
+
+
+def _normalize_result_payload(payload: object) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    video_meta = _extract_video_metadata(payload)
+    if video_meta and isinstance(video_meta.get("url"), str) and video_meta["url"]:
+        normalized["video"] = video_meta
+    seed = _extract_seed(payload)
+    if seed is not None:
+        normalized["seed"] = seed
+    if normalized:
+        return normalized
+    if isinstance(payload, Mapping):
+        return dict(payload)
+    return {"payload": payload}
+
+
 async def result_async(model_id: str, request_id: str) -> dict:
     """Return the fal.ai result using an asynchronous interface."""
 
-    return await asyncio.to_thread(get_result, model_id, request_id)
+    payload = await asyncio.to_thread(get_result, model_id, request_id)
+    return _normalize_result_payload(payload)
 
 
 # Backwards compatibility helpers used by worker.py tests
@@ -93,4 +235,5 @@ def submit(model_id: str, arguments: dict):  # pragma: no cover - simple wrapper
 
 
 def result(model_id: str, request_id: str) -> dict:  # pragma: no cover - simple wrapper
-    return get_result(model_id, request_id)
+    payload = get_result(model_id, request_id)
+    return _normalize_result_payload(payload)
