@@ -675,7 +675,7 @@ async function pollJobUntilComplete(jobId, options = {}) {
 
     let res;
     try {
-      res = await fetch(`/list_jobs/${USER_ID}`, {
+      res = await fetch(`/job/${jobId}`, {
         cache: 'no-store',
         headers: { Accept: 'application/json' }
       });
@@ -684,29 +684,28 @@ async function pollJobUntilComplete(jobId, options = {}) {
       continue;
     }
 
+    if (res.status === 404) {
+      setStatus('webhook', 'active', 'Waiting for Supabase record');
+      updateGenerationStatus(`Waiting for job #${jobId} to appear in Supabase…`, 'active');
+      clearWebhookDisplay(`Waiting for job #${jobId} to appear in Supabase…`);
+      continue;
+    }
+
     if (!res.ok) {
       console.warn('Job status request failed', res.status, res.statusText);
       continue;
     }
 
-    let jobs;
+    let job;
     try {
-      jobs = await res.json();
+      job = await res.json();
     } catch (err) {
-      console.error('Failed to parse jobs payload', err);
+      console.error('Failed to parse job payload', err);
       continue;
     }
 
-    if (!Array.isArray(jobs)) {
-      console.warn('Unexpected jobs payload', jobs);
-      continue;
-    }
-
-    const job = jobs.find(j => j.id === jobId);
-    if (!job) {
-      setStatus('webhook', 'active', 'Waiting for Supabase record');
-      updateGenerationStatus(`Waiting for job #${jobId} to appear in Supabase…`, 'active');
-      clearWebhookDisplay(`Waiting for job #${jobId} to appear in Supabase…`);
+    if (!job || typeof job !== 'object') {
+      console.warn('Unexpected job payload', job);
       continue;
     }
 
