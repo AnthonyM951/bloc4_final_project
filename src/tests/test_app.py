@@ -318,7 +318,7 @@ def test_list_jobs_includes_video_url(monkeypatch):
         "jobs",
         [
             {
-                "id": 1,
+                "id": "job-1",
                 "user_id": "user-123",
                 "status": "succeeded",
                 "params": {"fal_result": {"video": {"url": "https://fallback"}}},
@@ -329,7 +329,7 @@ def test_list_jobs_includes_video_url(monkeypatch):
         "videos",
         [
             {
-                "job_id": 1,
+                "job_id": "job-1",
                 "source_url": "https://cdn.example.com/video.mp4",
             }
         ],
@@ -351,7 +351,7 @@ def test_get_job_returns_video_url(monkeypatch):
         "jobs",
         [
             {
-                "id": 42,
+                "id": "job-42",
                 "user_id": "user-456",
                 "status": "running",
                 "params": {"fal_result": {"video": {"url": "https://fallback"}}},
@@ -362,18 +362,18 @@ def test_get_job_returns_video_url(monkeypatch):
         "videos",
         [
             {
-                "job_id": 42,
+                "job_id": "job-42",
                 "source_url": "https://cdn.example.com/video-42.mp4",
             }
         ],
     )
     monkeypatch.setattr(app_module, "supabase", dummy_supabase)
 
-    resp = client.get("/job/42")
+    resp = client.get("/job/job-42")
 
     assert resp.status_code == 200
     job = resp.get_json()
-    assert job["id"] == 42
+    assert job["id"] == "job-42"
     assert job["video_url"] == "https://cdn.example.com/video-42.mp4"
 
 
