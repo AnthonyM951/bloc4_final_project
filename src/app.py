@@ -80,7 +80,7 @@ FAL_QUEUE_RETRY_INTERVAL_SECONDS = max(
 
 @dataclass
 class _PendingFalJob:
-    job_id: int
+    job_id: str        # UUID string, plus int
     model_id: str
     deadline: float
     retries: int = 0
@@ -196,16 +196,18 @@ def _update_pending_job(
 
 
 def _clear_pending_fal_job(
-    request_id: str | None = None, *, job_id: int | None = None
+    request_id: str | None = None, *, job_id: str | None = None
 ) -> None:
+    """Retire un job de la liste des jobs en attente."""
     with _pending_jobs_lock:
         removed = False
         if request_id:
             removed = _pending_fal_jobs.pop(request_id, None) is not None
         if not removed and job_id is not None:
             for key, entry in list(_pending_fal_jobs.items()):
-                if entry.job_id == job_id:
+                if entry.job_id == str(job_id):  # ✅ comparer en string
                     _pending_fal_jobs.pop(key, None)
+
 
 
 def _coerce_mapping(value: object) -> dict[str, Any]:
@@ -237,15 +239,15 @@ def _normalize_job_id(value: object) -> int | None:
 
 
 def _merge_job_video_urls(jobs: list[dict[str, Any]]) -> None:
-    """Augment ``jobs`` in-place with ``video_url`` when available."""
+    """Augment jobs in-place with video_url when available (supports UUID job IDs)."""
 
     if not jobs or supabase is None:
         return
 
-    job_ids: list[int] = []
+    job_ids: list[str] = []
     for job in jobs:
-        job_id = _normalize_job_id(job.get("id"))
-        if job_id is not None:
+        job_id = job.get("id")
+        if isinstance(job_id, str) and job_id.strip():
             job_ids.append(job_id)
 
     if not job_ids:
@@ -255,7 +257,7 @@ def _merge_job_video_urls(jobs: list[dict[str, Any]]) -> None:
         video_res = (
             supabase.table("videos")
             .select("job_id, source_url")
-            .in_("job_id", job_ids)
+            .in_("job_id", job_ids)   # ✅ UUID string direct
             .order("created_at", desc=True)
             .execute()
         )
@@ -265,25 +267,30 @@ def _merge_job_video_urls(jobs: list[dict[str, Any]]) -> None:
     else:
         video_rows = getattr(video_res, "data", None) or []
 
-    video_map: dict[int, str] = {}
+    video_map: dict[str, str] = {}
     for row in video_rows:
-        job_id = _normalize_job_id(row.get("job_id"))
+        job_id = row.get("job_id")
         source_url = row.get("source_url")
-        if job_id is None or not isinstance(source_url, str) or not source_url:
-            continue
-        video_map.setdefault(job_id, source_url)
+        if isinstance(job_id, str) and isinstance(source_url, str) and source_url:
+            video_map.setdefault(job_id, source_url)
 
     for job in jobs:
-        job_id = _normalize_job_id(job.get("id"))
-        if job_id is None:
+        job_id = job.get("id")
+        if not isinstance(job_id, str):
             continue
+
+        # Si déjà défini, ne pas écraser
         existing_url = job.get("video_url")
         if isinstance(existing_url, str) and existing_url:
             continue
+
+        # Vérifie d’abord la table videos
         mapped_url = video_map.get(job_id)
         if mapped_url:
             job["video_url"] = mapped_url
             continue
+
+        # Fallback → chercher dans params.fal_result
         params = _coerce_mapping(job.get("params"))
         if not params:
             continue
@@ -291,6 +298,7 @@ def _merge_job_video_urls(jobs: list[dict[str, Any]]) -> None:
         url = _extract_video_url(fal_result)
         if url:
             job["video_url"] = url
+
 
 
 def _record_fal_webhook_event(
@@ -424,6 +432,22 @@ def _video_title_from_params(job_row: Mapping[str, Any], params: Mapping[str, An
         return prompt.strip()
     return "Video (fal.ai)"
 
+def _mark_job_failed(job_id: str, *payloads: object) -> str:
+    """Marque un job comme échoué dans Supabase (UUID string)."""
+    message = _normalize_error_message(*payloads) or "fal error"
+    normalized = _stringify_error_detail(message)
+
+    if supabase is not None:
+        try:
+            supabase.table("jobs").update({
+                "status": "failed",
+                "error": normalized,
+            }).eq("id", str(job_id)).execute()
+        except Exception as exc:
+            app.logger.error("Unable to mark job %s as failed: %s", job_id, exc)
+
+    return normalized
+
 
 def _finalize_fal_job_success(
     job_row: Mapping[str, Any],
@@ -448,12 +472,18 @@ def _finalize_fal_job_success(
     else:
         video_section = {}
 
-    existing_video_url = video_section.get("url") if isinstance(video_section.get("url"), str) else None
+    existing_video_url = (
+        video_section.get("url") if isinstance(video_section.get("url"), str) else None
+    )
 
+    # 🔍 Extraire ce que fal.ai a renvoyé
+    app.logger.info("Job %s: fal result payload=%s", job_id, result_payload)
     video_url, video_metadata = _extract_video_details(result_payload)
+    app.logger.info("Job %s: extracted video_url=%s metadata=%s", job_id, video_url, video_metadata)
 
     params_changed = False
 
+    # Sauvegarder le payload complet
     if isinstance(result_payload, Mapping):
         if result_section.get("payload") != result_payload:
             result_section["payload"] = result_payload
@@ -462,6 +492,7 @@ def _finalize_fal_job_success(
         result_section["payload"] = result_payload
         params_changed = True
 
+    # Ajouter les métadonnées vidéo
     if video_metadata:
         for key, value in video_metadata.items():
             if video_section.get(key) != value:
@@ -484,17 +515,21 @@ def _finalize_fal_job_success(
         new_params.pop("fal_result", None)
         params_changed = True
 
+    # 🔄 Sauvegarde mise à jour des params dans jobs
     if params_changed:
         try:
             supabase.table("jobs").update({"params": new_params}).eq("id", job_id).execute()
-        except Exception as exc:  # pragma: no cover - Supabase optional logging
-            app.logger.debug("Unable to persist fal result for job %s: %s", job_id, exc)
+        except Exception as exc:
+            app.logger.error("Job %s: unable to persist fal result: %s", job_id, exc)
 
-    final_video_url = (
-        video_section.get("url")
-        if isinstance(video_section.get("url"), str)
-        else video_url
-    )
+    # ✅ Priorité : récupérer l’URL finale
+    final_video_url = None
+    if isinstance(video_section.get("url"), str):
+        final_video_url = video_section["url"]
+    elif isinstance(video_url, str):
+        final_video_url = video_url
+    elif isinstance(video_metadata, dict) and isinstance(video_metadata.get("url"), str):
+        final_video_url = video_metadata["url"]
 
     if final_video_url and final_video_url != existing_video_url:
         video_record = {
@@ -505,31 +540,30 @@ def _finalize_fal_job_success(
         }
         try:
             supabase.table("videos").insert(video_record).execute()
-        except Exception as exc:  # pragma: no cover - Supabase optional logging
-            app.logger.debug("Unable to insert video record for job %s: %s", job_id, exc)
+            app.logger.info("✅ Saved video for job %s into videos table: %s", job_id, final_video_url)
+        except Exception as exc:
+            app.logger.error("❌ Failed to insert into videos table for job %s: %s", job_id, exc)
 
+        # 🔄 Fallback: écrire aussi dans la table jobs
+        try:
+            supabase.table("jobs").update({"video_url": final_video_url}).eq("id", job_id).execute()
+            app.logger.info("✅ Saved video_url in jobs table for job %s", job_id)
+        except Exception as exc:
+            app.logger.error("❌ Failed to save video_url in jobs table for job %s: %s", job_id, exc)
+
+    # ✅ Marquer le job terminé
     try:
         supabase.table("jobs").update({
             "status": "succeeded",
             "finished_at": current_timestamp(),
         }).eq("id", job_id).execute()
-    except Exception as exc:  # pragma: no cover - Supabase optional logging
-        app.logger.debug("Unable to mark job %s as succeeded: %s", job_id, exc)
+    except Exception as exc:
+        app.logger.error("❌ Unable to mark job %s as succeeded: %s", job_id, exc)
 
-
-def _mark_job_failed(job_id: int, *payloads: object) -> str:
-    message = _normalize_error_message(*payloads) or "fal error"
-    normalized = _stringify_error_detail(message)
-    if supabase is not None:
-        supabase.table("jobs").update({
-            "status": "failed",
-            "error": normalized,
-        }).eq("id", job_id).execute()
-    return normalized
 
 
 def _process_pending_fal_jobs() -> None:
-    """Fallback watchdog that uses the fal queue when webhooks are missing."""
+    """Fallback watchdog qui vérifie les jobs encore en attente (UUID ok)."""
 
     if supabase is None:
         return
@@ -548,14 +582,12 @@ def _process_pending_fal_jobs() -> None:
             job_res = (
                 supabase.table("jobs")
                 .select("id, user_id, status, params, prompt")
-                .eq("id", pending.job_id)
+                .eq("id", pending.job_id)   # ✅ UUID direct
                 .limit(1)
                 .execute()
             )
-        except Exception as exc:  # pragma: no cover - network failure logged
-            app.logger.debug(
-                "Queue watchdog could not load job %s: %s", pending.job_id, exc
-            )
+        except Exception as exc:
+            app.logger.debug("Queue watchdog could not load job %s: %s", pending.job_id, exc)
             _update_pending_job(
                 request_id,
                 deadline=now + FAL_QUEUE_RETRY_INTERVAL_SECONDS,
@@ -569,6 +601,8 @@ def _process_pending_fal_jobs() -> None:
             continue
 
         job = rows[0]
+        job_id = job["id"]
+
         status_value = (job.get("status") or "").lower()
         if status_value in {"succeeded", "failed"}:
             _clear_pending_fal_job(request_id)
@@ -583,10 +617,8 @@ def _process_pending_fal_jobs() -> None:
 
         try:
             status_payload = get_status(model_id, request_id)
-        except Exception as exc:  # pragma: no cover - network failure logged
-            app.logger.debug(
-                "Queue watchdog status fetch failed for %s: %s", request_id, exc
-            )
+        except Exception as exc:
+            app.logger.debug("Queue watchdog status fetch failed for %s: %s", request_id, exc)
             _update_pending_job(
                 request_id,
                 deadline=now + FAL_QUEUE_RETRY_INTERVAL_SECONDS,
@@ -599,56 +631,32 @@ def _process_pending_fal_jobs() -> None:
         if status_upper in {"COMPLETED", "SUCCESS", "OK"}:
             try:
                 result_payload = get_result(model_id, request_id)
-            except Exception as exc:  # pragma: no cover - network failure logged
-                app.logger.debug(
-                    "Queue watchdog result fetch failed for %s: %s", request_id, exc
-                )
-                _update_pending_job(
-                    request_id,
-                    deadline=now + FAL_QUEUE_RETRY_INTERVAL_SECONDS,
-                    increment_retry=True,
-                )
-                continue
-
-            try:
                 _finalize_fal_job_success(job, result_payload)
-            except Exception as exc:  # pragma: no cover - Supabase error logged
-                app.logger.exception(
-                    "Queue watchdog failed to finalize job %s: %s", request_id, exc
-                )
-            _clear_pending_fal_job(request_id, job_id=job["id"])
+            except Exception as exc:
+                app.logger.exception("Queue watchdog failed to finalize job %s: %s", request_id, exc)
+            _clear_pending_fal_job(request_id, job_id=job_id)
 
         elif status_upper in {"FAILED", "ERROR", "CANCELLED"}:
             try:
-                message = _mark_job_failed(job["id"], status_payload)
-            except Exception as exc:  # pragma: no cover - Supabase error logged
-                app.logger.exception(
-                    "Queue watchdog failed to mark job %s as failed: %s", request_id, exc
-                )
+                message = _mark_job_failed(job_id, status_payload)
+            except Exception as exc:
+                app.logger.exception("Queue watchdog failed to mark job %s as failed: %s", request_id, exc)
             else:
-                app.logger.error(
-                    "fal.ai job %s failed via queue fallback: %s", request_id, message
-                )
-            _clear_pending_fal_job(request_id, job_id=job["id"])
+                app.logger.error("fal.ai job %s failed via queue fallback: %s", request_id, message)
+            _clear_pending_fal_job(request_id, job_id=job_id)
 
         elif status_upper in {"IN_PROGRESS", "PROCESSING"}:
             try:
                 supabase.table("jobs").update({
                     "status": "running",
                     "started_at": current_timestamp(),
-                }).eq("id", job["id"]).execute()
-            except Exception:  # pragma: no cover - logging not critical
+                }).eq("id", job_id).execute()
+            except Exception:
                 pass
-            _update_pending_job(
-                request_id,
-                deadline=now + FAL_QUEUE_POLL_INTERVAL_SECONDS,
-            )
+            _update_pending_job(request_id, deadline=now + FAL_QUEUE_POLL_INTERVAL_SECONDS)
 
         elif status_upper in {"IN_QUEUE", "QUEUED"}:
-            _update_pending_job(
-                request_id,
-                deadline=now + FAL_QUEUE_POLL_INTERVAL_SECONDS,
-            )
+            _update_pending_job(request_id, deadline=now + FAL_QUEUE_POLL_INTERVAL_SECONDS)
 
         else:
             _update_pending_job(
@@ -656,6 +664,7 @@ def _process_pending_fal_jobs() -> None:
                 deadline=now + FAL_QUEUE_POLL_INTERVAL_SECONDS,
                 increment_retry=True,
             )
+
 
 
 def _ensure_scheduler_started() -> None:
@@ -683,11 +692,12 @@ def _ensure_scheduler_started() -> None:
 
 
 def _register_pending_fal_job(
-    request_id: str | None, job_id: int | None, model_id: str | None
+    request_id: str | None, job_id: str | None, model_id: str | None
 ) -> None:
+    """Register a pending fal.ai job so the watchdog can track it."""
     if (
         not request_id
-        or job_id is None
+        or not job_id
         or FAL_WEBHOOK_TIMEOUT_SECONDS <= 0
     ):
         return
@@ -696,20 +706,16 @@ def _register_pending_fal_job(
     if not resolved_model:
         return
 
-    try:
-        job_identifier = int(job_id)
-    except (TypeError, ValueError):
-        return
-
     deadline = monotonic() + FAL_WEBHOOK_TIMEOUT_SECONDS
     with _pending_jobs_lock:
         _pending_fal_jobs[request_id] = _PendingFalJob(
-            job_id=job_identifier,
+            job_id=str(job_id),  # 🔑 garder UUID en string
             model_id=resolved_model,
             deadline=deadline,
         )
 
     _ensure_scheduler_started()
+
 
 def sanitize_text(text: str) -> str:
     """Nettoyer le texte : autoriser seulement alphanumérique, tiret, underscore"""
@@ -1588,8 +1594,8 @@ def submit_job_fal():
 
 
 
-@app.get("/job/<int:job_id>")
-def get_job(job_id: int):
+@app.get("/job/<job_id>")
+def get_job(job_id: str):
     """Return a single job enriched with its video link when available."""
 
     if supabase is None:
@@ -1599,7 +1605,7 @@ def get_job(job_id: int):
         res = (
             supabase.table("jobs")
             .select("*")
-            .eq("id", job_id)
+            .eq("id", job_id)  # id est bien un UUID string
             .limit(1)
             .execute()
         )
@@ -1691,28 +1697,30 @@ def admin_kpis():
 
 
 def _sync_fal_jobs():
-    """Synchronise l'état des jobs fal.ai encore en attente."""
+    """Synchronise l'état des jobs fal.ai encore en attente (UUID ok)."""
     if supabase is None:
         return
 
     try:
-        res = supabase.table("jobs").select("id, external_job_id, params, user_id, prompt")\
-            .eq("provider", "fal")\
-            .in_("status", ["queued", "running"])\
-            .not_.is_("external_job_id", None)\
-            .limit(20).execute()
-
+        res = (
+            supabase.table("jobs")
+            .select("id, external_job_id, params, user_id, prompt")
+            .eq("provider", "fal")
+            .in_("status", ["queued", "running"])
+            .not_.is_("external_job_id", None)
+            .limit(20)
+            .execute()
+        )
         jobs = res.data
     except Exception:
         return
 
     for job in jobs:
-        job_id = job["id"]
+        job_id = job["id"]  # ✅ UUID string
         req_id = job.get("external_job_id")
         if not req_id:
             continue
 
-        user_id = job.get("user_id")
         params_raw = job.get("params")
         params = params_raw if isinstance(params_raw, Mapping) else {}
         model_id = params.get("model_id") or MODEL_DEFAULT
@@ -1736,16 +1744,10 @@ def _sync_fal_jobs():
 
             elif s in {"FAILED", "ERROR", "CANCELLED"}:
                 normalized_error = _mark_job_failed(job_id, st)
-                app.logger.error(
-                    "fal.ai job %s failed with status %s: %s",
-                    req_id,
-                    s or "?",
-                    normalized_error,
-                )
+                app.logger.error("fal.ai job %s failed with status %s: %s", req_id, s or "?", normalized_error)
                 _clear_pending_fal_job(req_id, job_id=job_id)
 
         except Exception:
             continue
-
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)

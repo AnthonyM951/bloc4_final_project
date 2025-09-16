@@ -101,7 +101,6 @@ def verify_fal_webhook(
     Raises ``FalWebhookVerificationError`` when the request cannot be
     authenticated.
     """
-
     if not _HAS_NACL:
         raise FalWebhookVerificationError("PyNaCl dependency missing")
 
@@ -110,6 +109,7 @@ def verify_fal_webhook(
     timestamp_raw = _required_header(headers, "X-Fal-Webhook-Timestamp")
     signature_hex = _required_header(headers, "X-Fal-Webhook-Signature")
 
+    # Vérifier timestamp
     try:
         timestamp_int = int(timestamp_raw)
     except ValueError as exc:
@@ -119,18 +119,22 @@ def verify_fal_webhook(
     if abs(current_time - timestamp_int) > 300:
         raise FalWebhookVerificationError("timestamp outside tolerance")
 
+    # Construire le message
     digest = hashlib.sha256(body).hexdigest()
     message = "\n".join([request_id, user_id, timestamp_raw, digest]).encode("utf-8")
 
+    # Décoder la signature
     try:
         signature = bytes.fromhex(signature_hex)
     except ValueError as exc:
         raise FalWebhookVerificationError("invalid signature format") from exc
 
+    # Vérifier avec les clés JWKS
     try:
         keys: Iterable[Mapping[str, object]] = fetch_keys()
-    except Exception as exc:  # pragma: no cover - network failure propagated
+    except Exception as exc:
         raise FalWebhookVerificationError("unable to fetch JWKS") from exc
+
     verified = False
     for key_info in keys:
         key_data = key_info.get("x")
