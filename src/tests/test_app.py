@@ -388,3 +388,61 @@ def test_get_job_missing_returns_404(monkeypatch):
     assert resp.status_code == 404
     data = resp.get_json()
     assert data["error"] == "job not found"
+
+
+def test_fal_status_endpoint_returns_logs_and_result(monkeypatch):
+    client = app.test_client()
+    dummy_supabase = DummySupabase()
+    dummy_supabase.queue_select(
+        "jobs",
+        [
+            {
+                "id": "job-200",
+                "external_job_id": "req-200",
+                "params": {"model_id": "fal-ai/infinitalk/single-text"},
+            }
+        ],
+    )
+    monkeypatch.setattr(app_module, "supabase", dummy_supabase)
+
+    calls: dict[str, tuple[str, str, bool] | tuple[str, str]] = {}
+
+    def fake_get_status(model_id, request_id, with_logs=False):
+        calls["status"] = (model_id, request_id, with_logs)
+        return {
+            "status": "SUCCESS",
+            "logs": [
+                {"message": "Retry attempt #1"},
+                "Retry attempt #2",
+            ],
+        }
+
+    def fake_get_result(model_id, request_id):
+        calls["result"] = (model_id, request_id)
+        return {"video": {"url": "https://cdn.example.com/video.mp4"}}
+
+    monkeypatch.setattr(app_module, "get_status", fake_get_status)
+    monkeypatch.setattr(app_module, "get_result", fake_get_result)
+
+    resp = client.get("/fal_status/job-200")
+
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["request_id"] == "req-200"
+    assert payload["model_id"] == "fal-ai/infinitalk/single-text"
+    assert payload["status_upper"] == "SUCCESS"
+    assert payload["logs"] == ["Retry attempt #1", "Retry attempt #2"]
+    assert payload["video"]["url"] == "https://cdn.example.com/video.mp4"
+    assert calls["status"] == ("fal-ai/infinitalk/single-text", "req-200", True)
+    assert calls["result"] == ("fal-ai/infinitalk/single-text", "req-200")
+
+
+def test_fal_status_missing_job(monkeypatch):
+    client = app.test_client()
+    dummy_supabase = DummySupabase()
+    dummy_supabase.queue_select("jobs", [])
+    monkeypatch.setattr(app_module, "supabase", dummy_supabase)
+
+    resp = client.get("/fal_status/unknown")
+
+    assert resp.status_code == 404

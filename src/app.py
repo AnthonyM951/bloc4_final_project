@@ -31,7 +31,7 @@ from bs4 import BeautifulSoup
 
 from requests import exceptions as requests_exceptions
 
-from fal_client import get_result, submit_text2video
+from fal_client import get_result, get_status, submit_text2video
 
 def debug_log(func):
     """Décorateur pour tracer les appels de fonction et leurs retours."""
@@ -317,6 +317,73 @@ def _extract_status_label(payload: object) -> str | None:
             if nested:
                 return nested
     return _coerce_status_value(payload)
+
+
+def _stringify_log_entry(value: object) -> str | None:
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped or None
+    if isinstance(value, Mapping):
+        for key in ("message", "msg", "text", "detail", "status"):
+            candidate = value.get(key)
+            if isinstance(candidate, str):
+                stripped = candidate.strip()
+                if stripped:
+                    return stripped
+        if "attempt" in value and "retry" in value:
+            attempt = value.get("attempt")
+            retry = value.get("retry")
+            fragments = [str(part).strip() for part in (retry, attempt) if part is not None]
+            joined = " ".join(fragment for fragment in fragments if fragment)
+            if joined:
+                return joined
+    if value is None:
+        return None
+    try:
+        serialized = json.dumps(value, ensure_ascii=False)
+    except TypeError:
+        serialized = str(value)
+    stripped = serialized.strip()
+    return stripped or None
+
+
+def _extract_status_logs(payload: object) -> list[str]:
+    logs: list[str] = []
+    seen_nodes: set[int] = set()
+    seen_messages: set[str] = set()
+
+    def add_entry(text: str | None) -> None:
+        if not text:
+            return
+        if text in seen_messages:
+            return
+        logs.append(text)
+        seen_messages.add(text)
+
+    def visit(node: object) -> None:
+        if isinstance(node, Mapping):
+            node_id = id(node)
+            if node_id in seen_nodes:
+                return
+            seen_nodes.add(node_id)
+            candidate = node.get("logs")
+            if isinstance(candidate, Sequence) and not isinstance(
+                candidate, (str, bytes, bytearray)
+            ):
+                for entry in candidate:
+                    add_entry(_stringify_log_entry(entry))
+            for value in node.values():
+                visit(value)
+        elif isinstance(node, Sequence) and not isinstance(node, (str, bytes, bytearray)):
+            node_id = id(node)
+            if node_id in seen_nodes:
+                return
+            seen_nodes.add(node_id)
+            for item in node:
+                visit(item)
+
+    visit(payload)
+    return logs
 
 
 def _poll_fal_job(job_id: str, request_id: str, model_id: str) -> None:
@@ -1448,6 +1515,98 @@ def get_job(job_id: str):
     job_payload = dict(first_row) if isinstance(first_row, Mapping) else first_row
     _merge_job_video_urls([job_payload])
     return jsonify(job_payload)
+
+
+@app.get("/fal_status/<job_id>")
+def fal_status(job_id: str):
+    """Return the latest fal.ai status (with logs) for a given job."""
+
+    if supabase is None:
+        return jsonify({"error": "Supabase not available"}), 500
+
+    try:
+        res = (
+            supabase.table("jobs")
+            .select("id, external_job_id, params")
+            .eq("id", job_id)
+            .limit(1)
+            .execute()
+        )
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    rows = getattr(res, "data", None) or []
+    if not rows:
+        return jsonify({"error": "job not found"}), 404
+
+    raw_row = rows[0]
+    job_row = dict(raw_row) if isinstance(raw_row, Mapping) else raw_row
+
+    request_id = job_row.get("external_job_id")
+    if not isinstance(request_id, str) or not request_id.strip():
+        return jsonify({"error": "external job id missing"}), 404
+    request_id = request_id.strip()
+
+    params_dict = _coerce_mapping(job_row.get("params"))
+    model_identifier = params_dict.get("model_id")
+    if not isinstance(model_identifier, str) or not model_identifier.strip():
+        fallback = MODEL_DEFAULT if isinstance(MODEL_DEFAULT, str) else None
+        if fallback:
+            model_identifier = fallback.strip()
+        else:
+            return jsonify({"error": "model id missing"}), 400
+    else:
+        model_identifier = model_identifier.strip()
+
+    try:
+        status_payload = get_status(model_identifier, request_id, with_logs=True)
+    except Exception as exc:
+        return (
+            jsonify(
+                {
+                    "error": str(exc),
+                    "request_id": request_id,
+                    "model_id": model_identifier,
+                }
+            ),
+            502,
+        )
+
+    status_label = _extract_status_label(status_payload)
+    status_upper = status_label.upper() if isinstance(status_label, str) else ""
+    logs = _extract_status_logs(status_payload)
+
+    response_payload: dict[str, Any] = {
+        "job_id": job_id,
+        "request_id": request_id,
+        "model_id": model_identifier,
+        "status": status_payload,
+        "status_label": status_label,
+        "logs": logs,
+    }
+    if status_upper:
+        response_payload["status_upper"] = status_upper
+
+    success_states = {"SUCCESS", "SUCCEEDED", "COMPLETED", "OK"}
+    result_payload: dict[str, Any] | None = None
+    result_error: str | None = None
+    if status_upper in success_states:
+        try:
+            result_payload = get_result(model_identifier, request_id)
+        except Exception as exc:  # pragma: no cover - gracefully surfaced
+            result_error = str(exc)
+
+    if result_payload is not None:
+        response_payload["result"] = result_payload
+        video_url, video_meta = _extract_video_details(result_payload)
+        if video_meta:
+            response_payload["video"] = video_meta
+        elif video_url:
+            response_payload["video_url"] = video_url
+    elif result_error:
+        response_payload["result_error"] = result_error
+
+    return jsonify(response_payload)
 
 
 @app.get("/list_jobs/<user_id>")
