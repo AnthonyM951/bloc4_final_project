@@ -57,6 +57,16 @@ def sanitize_text(text: str) -> str:
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 
+WIKIPEDIA_USER_AGENT = os.getenv(
+    "WIKIPEDIA_USER_AGENT",
+    "bloc4-final-project/1.0 (+https://github.com/lewagon/bloc4_final_project)",
+)
+WIKIPEDIA_HEADERS = {"User-Agent": WIKIPEDIA_USER_AGENT}
+WIKIPEDIA_API_HEADERS = {
+    "User-Agent": WIKIPEDIA_USER_AGENT,
+    "Accept": "application/json",
+}
+
 
 def check_ollama_connection(timeout: float = 2.0) -> bool:
     """Return ``True`` when the Ollama service responds, ``False`` otherwise."""
@@ -102,9 +112,13 @@ def extract_keywords(text: str) -> list[str]:
     return re.findall(r"\b\w+\b", text)[:3]
 
 
-def wikipedia_search(keywords: list[str]) -> dict[str, list[str]]:
-    """Recherche Wikipedia pour chaque mot-clé et renvoie une liste de liens."""
+def wikipedia_search(
+    keywords: list[str],
+) -> tuple[dict[str, list[str]], dict[str, str]]:
+    """Recherche Wikipedia pour chaque mot-clé et renvoie liens et erreurs."""
+
     results: dict[str, list[str]] = {}
+    errors: dict[str, str] = {}
     for kw in keywords:
         try:
             resp = requests.get(
@@ -116,33 +130,52 @@ def wikipedia_search(keywords: list[str]) -> dict[str, list[str]]:
                     "format": "json",
                     "utf8": 1,
                 },
+                headers=WIKIPEDIA_API_HEADERS,
                 timeout=10,
             )
-            items = resp.json().get("query", {}).get("search", [])[:3]
-            links = []
-            for item in items:
-                title = item.get("title")
-                if title:
-                    url = f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}"
-                    links.append(url)
-            results[kw] = links
-        except Exception:
+            resp.raise_for_status()
+        except requests.exceptions.RequestException as exc:
             results[kw] = []
-    return results
+            errors[kw] = f"Wikipedia API request failed: {exc}"
+            continue
+
+        try:
+            payload = resp.json()
+        except ValueError as exc:  # pragma: no cover - rare decoding error
+            results[kw] = []
+            errors[kw] = f"Wikipedia API response was not JSON: {exc}"
+            continue
+
+        items = payload.get("query", {}).get("search", [])[:3]
+        links = []
+        for item in items:
+            title = item.get("title")
+            if title:
+                url = f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}"
+                links.append(url)
+        results[kw] = links
+
+    return results, errors
 
 
-def scrape_and_clean(url: str) -> str:
-    """Récupère et nettoie le contenu textuel d'une page Wikipedia."""
+def scrape_and_clean(url: str) -> tuple[str, str | None]:
+    """Récupère le texte d'une page Wikipedia et retourne (texte, erreur)."""
+
     try:
-        resp = requests.get(url, timeout=10)
+        resp = requests.get(url, headers=WIKIPEDIA_HEADERS, timeout=10)
+        resp.raise_for_status()
+    except requests.exceptions.RequestException as exc:
+        return "", f"HTTP error: {exc}"
+
+    try:
         soup = BeautifulSoup(resp.text, "html.parser")
         paragraphs = [p.get_text(" ", strip=True) for p in soup.select("p")]
         text = " ".join(paragraphs)
         text = re.sub(r"\[[^\]]*\]", "", text)
         text = re.sub(r"\s+", " ", text)
-        return text
-    except Exception:
-        return ""
+        return text, None
+    except Exception as exc:  # pragma: no cover - parsing issues are rare
+        return "", f"Failed to parse HTML: {exc}"
 
 
 def summarize_text(text: str) -> str:
@@ -553,10 +586,35 @@ def wiki_summary():
     data = request.get_json(force=True)
     query = data.get("query", "")
     keywords = extract_keywords(query)
-    results = wikipedia_search(keywords)
-    texts = [scrape_and_clean(url) for links in results.values() for url in links]
-    summary = summarize_text(" ".join(texts)) if texts else ""
-    return jsonify({"keywords": keywords, "results": results, "summary": summary})
+    results, search_errors = wikipedia_search(keywords)
+
+    texts: list[str] = []
+    error_messages = [
+        f"Search for '{kw}' failed: {msg}" for kw, msg in search_errors.items()
+    ]
+
+    for kw, links in results.items():
+        for url in links:
+            text, scrape_error = scrape_and_clean(url)
+            if text:
+                texts.append(text)
+            elif scrape_error:
+                error_messages.append(
+                    f"Scraping '{kw}' from {url} failed: {scrape_error}"
+                )
+
+    combined_text = " ".join(texts)
+    summary = summarize_text(combined_text) if combined_text else ""
+
+    payload: dict[str, object] = {
+        "keywords": keywords,
+        "results": results,
+        "summary": summary,
+    }
+    if error_messages:
+        payload["errors"] = error_messages
+
+    return jsonify(payload)
 
 
 @app.post("/submit_job")

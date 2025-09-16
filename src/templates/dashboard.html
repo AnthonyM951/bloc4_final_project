@@ -109,6 +109,22 @@ function renderScrapeResults(data, jobId) {
     });
     debugOutput.appendChild(list);
   }
+
+  if (Array.isArray(data.errors) && data.errors.length) {
+    const errorHeading = document.createElement('p');
+    errorHeading.className = 'text-red-400 font-semibold mt-3';
+    errorHeading.textContent = 'Errors';
+    debugOutput.appendChild(errorHeading);
+
+    const errorsList = document.createElement('ul');
+    errorsList.className = 'list-disc list-inside mt-1 space-y-1 text-red-300';
+    data.errors.forEach(message => {
+      const li = document.createElement('li');
+      li.textContent = message;
+      errorsList.appendChild(li);
+    });
+    debugOutput.appendChild(errorsList);
+  }
 }
 
 function normalizeError(err) {
