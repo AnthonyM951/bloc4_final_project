@@ -36,16 +36,13 @@ def submit_text2video(
     input_data: str | Mapping[str, Any],
     webhook_url: str | None = None,
 ) -> str:
-    payload: dict[str, object] = {"input": _normalize_input(input_data)}
-    params = None
+    payload: dict[str, object] = _normalize_input(input_data)
     if webhook_url:
-        payload["webhookUrl"] = webhook_url
-        params = {"fal_webhook": webhook_url}
+        payload.setdefault("webhook_url", webhook_url)
     endpoint = f"{FAL_QUEUE_BASE.rstrip('/')}/{model_id.lstrip('/')}"
     r = requests.post(
         endpoint,
         headers=_headers(),
-        params=params,
         json=payload,
         timeout=30,
     )
