@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 
@@ -34,10 +35,10 @@ class DummyResponse:
 def capture_post(monkeypatch):
     captured: dict[str, object] = {}
 
-    def fake_post(url, headers, json, timeout):
+    def fake_post(url, headers, data, timeout):
         captured["url"] = url
         captured["headers"] = headers
-        captured["json"] = json
+        captured["data"] = data
         captured["timeout"] = timeout
         return DummyResponse({"request_id": "req-123"})
 
@@ -60,11 +61,11 @@ def test_submit_text2video_flattens_payload(capture_post):
     )
 
     assert req_id == "req-123"
-    payload = capture_post["json"]
-    assert payload["prompt"] == "hello"
-    assert payload["voice"] == "Brian"
-    assert "webhook_url" not in payload
-    assert "input" not in payload
+    payload = json.loads(capture_post["data"])
+    assert payload["input"]["prompt"] == "hello"
+    assert payload["input"]["voice"] == "Brian"
+    assert "webhook_url" not in payload["input"]
+    assert capture_post["headers"].get("Authorization", "").startswith("Key ")
 
 
 def test_submit_text2video_accepts_string_input(capture_post):
@@ -73,8 +74,8 @@ def test_submit_text2video_accepts_string_input(capture_post):
         "a smiling teacher",
     )
 
-    payload = capture_post["json"]
-    assert payload == {"prompt": "a smiling teacher"}
+    payload = json.loads(capture_post["data"])
+    assert payload == {"input": {"prompt": "a smiling teacher"}}
 
 
 @pytest.mark.anyio("asyncio")
