@@ -48,6 +48,8 @@
       <tr class="text-left">
         <th class="px-2 py-1">ID</th>
         <th class="px-2 py-1">Prompt</th>
+        <th class="px-2 py-1">Provider</th>
+        <th class="px-2 py-1">Request ID</th>
         <th class="px-2 py-1">Status</th>
         <th class="px-2 py-1">Submitted</th>
         <th class="px-2 py-1">Video</th>
@@ -62,9 +64,11 @@ const USER_ID = {{ user_id | tojson }};
 const debugOutput = document.getElementById('scrape-debug');
 const statusOutput = document.getElementById('scrape-status');
 const STATUS_STEPS = [
-  { id: 'queued', label: 'Queued' },
-  { id: 'summarizing', label: 'Summarizing' },
-  { id: 'generating', label: 'Generating' }
+  { id: 'queued', label: 'Job queued' },
+  { id: 'summary', label: 'Ollama summary' },
+  { id: 'fal_request', label: 'fal.ai submission' },
+  { id: 'webhook', label: 'Webhook update' },
+  { id: 'generation', label: 'Video generation' }
 ];
 const statusElements = new Map();
 let pollSequence = 0;
@@ -240,19 +244,27 @@ async function loadJobs() {
       videoLinks = `<a href="${job.video_url}" target="_blank" class="text-teal-400">View</a>`+
                    ` <a href="${job.video_url}" download class="text-teal-400 ml-2">Download</a>`;
     }
+    const provider = job.provider || '—';
+    const requestId = job.external_job_id || '—';
+    const promptText = job.prompt || '';
+    const submittedAt = job.submitted_at || '—';
+    const statusText = job.status || '—';
     tr.innerHTML = `<td class="px-2 py-1">${job.id}</td>`+
-                   `<td class="px-2 py-1">${job.prompt}</td>`+
-                   `<td class="px-2 py-1">${job.status}</td>`+
-                   `<td class="px-2 py-1">${job.submitted_at}</td>`+
+                   `<td class="px-2 py-1">${promptText}</td>`+
+                   `<td class="px-2 py-1">${provider}</td>`+
+                   `<td class="px-2 py-1">${requestId}</td>`+
+                   `<td class="px-2 py-1">${statusText}</td>`+
+                   `<td class="px-2 py-1">${submittedAt}</td>`+
                    `<td class="px-2 py-1">${videoLinks}</td>`;
     body.appendChild(tr);
   });
 }
 
 async function pollJobUntilComplete(jobId, options = {}) {
-  const { interval = 5000, maxAttempts = 15 } = options;
+  const { interval = 5000, maxAttempts = 15, requestId = null } = options;
   const sequence = ++pollSequence;
   let lastStatus = null;
+  let knownRequestId = requestId;
 
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     if (sequence !== pollSequence) {
@@ -296,6 +308,8 @@ async function pollJobUntilComplete(jobId, options = {}) {
 
     const job = jobs.find(j => j.id === jobId);
     if (!job) {
+      setStatus('webhook', 'active', 'Waiting for Supabase record');
+      updateGenerationStatus(`Waiting for job #${jobId} to appear in Supabase…`, 'active');
       continue;
     }
 
@@ -304,32 +318,46 @@ async function pollJobUntilComplete(jobId, options = {}) {
       loadJobs();
     }
 
+    if (job.external_job_id && job.external_job_id !== knownRequestId) {
+      knownRequestId = job.external_job_id;
+      setStatus('fal_request', 'done', `Request ${knownRequestId} accepted`);
+    }
+
     const normalizedStatus = typeof job.status === 'string' ? job.status.toLowerCase() : '';
 
     if (normalizedStatus === 'succeeded') {
       if (sequence !== pollSequence) return;
-      setStatus('generating', 'done', 'Video ready');
-      updateGenerationStatus(`Video generated successfully for job #${jobId}.`, 'success');
+      setStatus('webhook', 'done', 'fal.ai delivered the result');
+      setStatus('generation', 'done', 'Video ready');
+      const reqDisplay = knownRequestId ? ` (request ${knownRequestId})` : '';
+      updateGenerationStatus(`Video generated successfully for job #${jobId}${reqDisplay}.`, 'success');
       loadJobs();
       return;
     }
 
     if (normalizedStatus === 'failed') {
       if (sequence !== pollSequence) return;
-      setStatus('generating', 'error', 'Generation failed');
-      updateGenerationStatus(`Video generation failed for job #${jobId}.`, 'error');
+      setStatus('webhook', 'error', 'fal.ai reported a failure');
+      setStatus('generation', 'error', 'Generation failed');
+      const reqDisplay = knownRequestId ? ` (request ${knownRequestId})` : '';
+      updateGenerationStatus(`Video generation failed for job #${jobId}${reqDisplay}.`, 'error');
       loadJobs();
       return;
     }
 
     if (normalizedStatus === 'running') {
-      setStatus('generating', 'active', 'Video generation in progress');
-      updateGenerationStatus('Video generation in progress...', 'active');
+      setStatus('webhook', 'active', 'fal.ai processing');
+      setStatus('generation', 'active', 'Video generation in progress');
+      const reqDisplay = knownRequestId ? ` (request ${knownRequestId})` : '';
+      updateGenerationStatus(`Video generation in progress${reqDisplay}…`, 'active');
     } else if (normalizedStatus === 'queued') {
-      setStatus('generating', 'active', 'Queued for generation');
-      updateGenerationStatus('Job queued for generation...', 'active');
+      setStatus('webhook', 'active', 'Waiting for fal.ai to start');
+      setStatus('generation', 'pending', 'Waiting to start');
+      const reqDisplay = knownRequestId ? ` (request ${knownRequestId})` : '';
+      updateGenerationStatus(`Job queued for generation${reqDisplay}…`, 'active');
     } else {
-      setStatus('generating', 'active', job.status || 'In progress');
+      setStatus('webhook', 'active', job.status || 'In progress');
+      setStatus('generation', 'active', 'Processing update received');
       updateGenerationStatus(`Current job status: ${job.status}`, 'active');
     }
   }
@@ -337,7 +365,8 @@ async function pollJobUntilComplete(jobId, options = {}) {
   if (sequence !== pollSequence) {
     return;
   }
-  setStatus('generating', 'error', 'Timed out');
+  setStatus('webhook', 'error', 'Timed out waiting for webhook');
+  setStatus('generation', 'error', 'Timed out');
   updateGenerationStatus('Timed out waiting for video generation to finish.', 'error');
 }
 
@@ -347,27 +376,58 @@ document.getElementById('job-form').addEventListener('submit', async (e) => {
   const imageUrl = document.getElementById('image-url').value;
   resetStatuses();
   setStatus('queued', 'active', 'Submitting job');
-  updateDebugMessage('Submitting job...');
+  setStatus('fal_request', 'active', 'Sending request to fal.ai');
+  setStatus('webhook', 'pending', 'Waiting for webhook');
+  updateDebugMessage('Submitting job to fal.ai...');
   let jobData;
+  let jobId = null;
+  let externalJobId = null;
+  let webhookUrl = null;
   try {
-    const jobRes = await fetch('/submit_job', {
+    const jobRes = await fetch('/submit_job_fal', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ user_id: USER_ID, prompt, params: { image_url: imageUrl } })
+      body: JSON.stringify({
+        user_id: USER_ID,
+        prompt,
+        text_input: prompt,
+        image_url: imageUrl
+      })
     });
 
+    let payload;
+    try {
+      payload = await jobRes.json();
+    } catch (_) {
+      setStatus('queued', 'error', 'Invalid server response');
+      setStatus('fal_request', 'error', 'fal.ai submission failed');
+      setStatus('webhook', 'error', 'Webhook not scheduled');
+      throw new Error('Failed to parse response from server');
+    }
+
     if (jobRes.ok) {
-      jobData = await jobRes.json();
-      setStatus('queued', 'done', `Job #${jobData.id} queued`);
+      jobData = payload;
+      jobId = jobData.job_id ?? jobData.id ?? null;
+      externalJobId = jobData.external_job_id || jobData.request_id || null;
+      webhookUrl = jobData.webhook_url || null;
+      setStatus('queued', 'done', jobId ? `Job #${jobId} queued` : 'Job queued');
+      const requestMessage = externalJobId ? `Request ${externalJobId} queued` : 'Request queued';
+      setStatus('fal_request', 'done', requestMessage);
+      setStatus('webhook', 'active', 'Awaiting fal.ai webhook');
+      const details = [
+        jobId ? `Job #${jobId} queued on fal.ai.` : 'Job queued on fal.ai.',
+        externalJobId ? `Request ID: ${externalJobId}` : null,
+        webhookUrl ? `Webhook: ${webhookUrl}` : null
+      ].filter(Boolean).join(' ');
+      updateDebugMessage(details || 'Job queued.', 'success');
     } else {
       let detail = `${jobRes.status} ${jobRes.statusText}`;
-      try {
-        const payload = await jobRes.json();
-        if (payload && payload.error) {
-          detail = payload.error;
-        }
-      } catch (_) {}
+      if (payload && payload.error) {
+        detail = payload.error;
+      }
       setStatus('queued', 'error', 'Job submission failed');
+      setStatus('fal_request', 'error', 'fal.ai submission failed');
+      setStatus('webhook', 'error', 'Webhook not scheduled');
       throw new Error(detail);
     }
 
@@ -377,12 +437,18 @@ document.getElementById('job-form').addEventListener('submit', async (e) => {
 
     loadJobs();
   } catch (err) {
+    setStatus('queued', 'error', 'Job submission failed');
+    setStatus('fal_request', 'error', 'fal.ai submission failed');
+    setStatus('webhook', 'error', 'Webhook not scheduled');
     updateDebugMessage(`Job submission failed: ${normalizeError(err)}`, 'error');
     return;
   }
 
-  setStatus('summarizing', 'active', 'Fetching Wikipedia data');
-  updateDebugMessage(`Job #${jobData.id} submitted. Running Wikipedia scraping debug...`);
+  const summaryJobId = jobId ?? jobData?.id;
+  setStatus('summary', 'active', 'Fetching Wikipedia data with Ollama');
+  const submissionNote = summaryJobId ? `Job #${summaryJobId}` : 'Job';
+  const requestNote = externalJobId ? ` (request ${externalJobId})` : '';
+  updateDebugMessage(`${submissionNote}${requestNote} submitted. Running Wikipedia scraping debug...`);
 
   try {
     const summaryRes = await fetch('/wiki_summary', {
@@ -399,23 +465,32 @@ document.getElementById('job-form').addEventListener('submit', async (e) => {
           detail = payload.error;
         }
       } catch (_) {}
-      setStatus('summarizing', 'error', 'Summary failed');
-      setStatus('generating', 'pending', 'Waiting to start');
+      setStatus('summary', 'error', 'Summary failed');
+      setStatus('generation', 'pending', 'Waiting to start');
       throw new Error(detail);
     }
 
     const data = await summaryRes.json();
-    setStatus('summarizing', 'done', 'Summary generated');
-    renderScrapeResults(data, jobData.id);
+    setStatus('summary', 'done', 'Course script generated');
+    renderScrapeResults(data, summaryJobId);
   } catch (err) {
     updateDebugMessage(`Scraping debug failed: ${normalizeError(err)}`, 'error');
     return;
   }
 
-  setStatus('generating', 'active', 'Waiting for generation update');
+  setStatus('generation', 'active', 'Waiting for generation update');
+  setStatus('webhook', 'active', 'Waiting for fal.ai webhook');
   updateGenerationStatus('Awaiting video generation status...', 'active');
-  pollJobUntilComplete(jobData.id).catch((err) => {
-    setStatus('generating', 'error', 'Status check failed');
+  const pollJobId = summaryJobId ?? jobData.id;
+  if (pollJobId == null) {
+    setStatus('generation', 'error', 'Missing job identifier');
+    setStatus('webhook', 'error', 'Missing job identifier');
+    updateGenerationStatus('Cannot monitor job without an ID.', 'error');
+    return;
+  }
+  pollJobUntilComplete(pollJobId, { requestId: externalJobId }).catch((err) => {
+    setStatus('generation', 'error', 'Status check failed');
+    setStatus('webhook', 'error', 'Status check failed');
     updateGenerationStatus(`Failed to check job status: ${normalizeError(err)}`, 'error');
   });
 });
