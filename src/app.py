@@ -223,6 +223,76 @@ def _coerce_mapping(value: object) -> dict[str, Any]:
     return {}
 
 
+def _normalize_job_id(value: object) -> int | None:
+    """Convert Supabase identifiers to integers when possible."""
+
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _merge_job_video_urls(jobs: list[dict[str, Any]]) -> None:
+    """Augment ``jobs`` in-place with ``video_url`` when available."""
+
+    if not jobs or supabase is None:
+        return
+
+    job_ids: list[int] = []
+    for job in jobs:
+        job_id = _normalize_job_id(job.get("id"))
+        if job_id is not None:
+            job_ids.append(job_id)
+
+    if not job_ids:
+        return
+
+    try:
+        video_res = (
+            supabase.table("videos")
+            .select("job_id, source_url")
+            .in_("job_id", job_ids)
+            .order("created_at", desc=True)
+            .execute()
+        )
+    except Exception as exc:  # pragma: no cover - Supabase optional logging
+        app.logger.debug("Unable to load video URLs for jobs %s: %s", job_ids, exc)
+        video_rows: list[Mapping[str, Any]] = []
+    else:
+        video_rows = getattr(video_res, "data", None) or []
+
+    video_map: dict[int, str] = {}
+    for row in video_rows:
+        job_id = _normalize_job_id(row.get("job_id"))
+        source_url = row.get("source_url")
+        if job_id is None or not isinstance(source_url, str) or not source_url:
+            continue
+        video_map.setdefault(job_id, source_url)
+
+    for job in jobs:
+        job_id = _normalize_job_id(job.get("id"))
+        if job_id is None:
+            continue
+        existing_url = job.get("video_url")
+        if isinstance(existing_url, str) and existing_url:
+            continue
+        mapped_url = video_map.get(job_id)
+        if mapped_url:
+            job["video_url"] = mapped_url
+            continue
+        params = _coerce_mapping(job.get("params"))
+        if not params:
+            continue
+        fal_result = params.get("fal_result")
+        url = _extract_video_url(fal_result)
+        if url:
+            job["video_url"] = url
+
+
 def _extract_video_details(payload: object) -> tuple[str | None, dict[str, Any]]:
     """Return the first video URL and metadata found in *payload*."""
 
@@ -1421,8 +1491,15 @@ def list_jobs(user_id):
     if supabase is None:
         return jsonify({"error": "Supabase not available"}), 500
     try:
-        res = supabase.table("jobs").select("*").eq("user_id", user_id).order("submitted_at", desc=True).execute()
-        jobs = res.data
+        res = (
+            supabase.table("jobs")
+            .select("*")
+            .eq("user_id", user_id)
+            .order("submitted_at", desc=True)
+            .execute()
+        )
+        jobs = list(res.data or [])
+        _merge_job_video_urls(jobs)
         return jsonify(jobs)
     except Exception as e:
         return jsonify({"error": str(e)}), 400
@@ -1446,8 +1523,14 @@ def admin_list_jobs():
     if supabase is None:
         return jsonify({"error": "Supabase not available"}), 500
     try:
-        res = supabase.table("jobs").select("*").order("submitted_at", desc=True).execute()
-        jobs = res.data
+        res = (
+            supabase.table("jobs")
+            .select("*")
+            .order("submitted_at", desc=True)
+            .execute()
+        )
+        jobs = list(res.data or [])
+        _merge_job_video_urls(jobs)
         return jsonify(jobs)
     except Exception as e:
         return jsonify({"error": str(e)}), 400

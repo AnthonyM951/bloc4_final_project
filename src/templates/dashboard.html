@@ -152,6 +152,7 @@ function resetStatuses() {
 
 function updateGenerationStatus(message, tone = 'info') {
   if (!debugOutput) return;
+  showGenerationVideoLinks(null);
   let note = document.getElementById('generation-status');
   if (!note) {
     note = document.createElement('p');
@@ -261,6 +262,111 @@ function escapeHtml(value) {
     .replace(/\r/g, '&#13;');
 }
 
+function safeJsonParse(value) {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  try {
+    return JSON.parse(value);
+  } catch (_) {
+    return null;
+  }
+}
+
+function extractVideoUrlFromPayload(payload) {
+  if (!payload) return null;
+  if (typeof payload === 'string') {
+    return payload.trim() || null;
+  }
+  if (Array.isArray(payload)) {
+    for (const item of payload) {
+      const nested = extractVideoUrlFromPayload(item);
+      if (nested) return nested;
+    }
+    return null;
+  }
+  if (typeof payload === 'object') {
+    const directKeys = ['video_url', 'videoUrl', 'url', 'signed_url', 'source_url'];
+    for (const key of directKeys) {
+      const value = payload[key];
+      if (typeof value === 'string' && value) {
+        return value;
+      }
+    }
+    if (payload.video) {
+      const nestedVideo = extractVideoUrlFromPayload(payload.video);
+      if (nestedVideo) return nestedVideo;
+    }
+    if (Array.isArray(payload.videos)) {
+      for (const item of payload.videos) {
+        const nested = extractVideoUrlFromPayload(item);
+        if (nested) return nested;
+      }
+    }
+    const nestedKeys = ['payload', 'data', 'response', 'result'];
+    for (const key of nestedKeys) {
+      if (payload[key]) {
+        const nested = extractVideoUrlFromPayload(payload[key]);
+        if (nested) return nested;
+      }
+    }
+  }
+  return null;
+}
+
+function extractVideoUrlFromJob(job) {
+  if (!job || typeof job !== 'object') return null;
+  if (typeof job.video_url === 'string' && job.video_url) {
+    return job.video_url;
+  }
+  if (typeof job.videoUrl === 'string' && job.videoUrl) {
+    return job.videoUrl;
+  }
+  const params = job.params;
+  let parsedParams = params;
+  if (!parsedParams || typeof parsedParams !== 'object') {
+    parsedParams = safeJsonParse(params);
+  }
+  if (parsedParams && typeof parsedParams === 'object') {
+    const falResult = parsedParams.fal_result || parsedParams.falResult || parsedParams.result;
+    const url = extractVideoUrlFromPayload(falResult);
+    if (url) return url;
+  }
+  if (job.fal_result) {
+    const url = extractVideoUrlFromPayload(job.fal_result);
+    if (url) return url;
+  }
+  return extractVideoUrlFromPayload(job);
+}
+
+function showGenerationVideoLinks(videoUrl) {
+  const note = document.getElementById('generation-status');
+  if (!note) return;
+  const existing = note.querySelector('[data-video-links]');
+  if (existing) {
+    existing.remove();
+  }
+  if (!videoUrl) return;
+  const container = document.createElement('span');
+  container.dataset.videoLinks = 'true';
+  container.className = 'inline-flex items-center gap-3 ml-3';
+  const viewLink = document.createElement('a');
+  viewLink.href = videoUrl;
+  viewLink.target = '_blank';
+  viewLink.rel = 'noopener';
+  viewLink.className = 'text-teal-300 underline';
+  viewLink.textContent = 'View video';
+  const downloadLink = document.createElement('a');
+  downloadLink.href = videoUrl;
+  downloadLink.download = '';
+  downloadLink.rel = 'noopener';
+  downloadLink.className = 'text-teal-300 underline';
+  downloadLink.textContent = 'Download';
+  container.appendChild(viewLink);
+  container.appendChild(downloadLink);
+  note.appendChild(container);
+}
+
 async function loadJobs() {
   const res = await fetch(`/list_jobs/${USER_ID}`, { cache: 'no-store' });
   const jobs = await res.json();
@@ -268,10 +374,12 @@ async function loadJobs() {
   body.innerHTML = '';
   jobs.forEach(job => {
     const tr = document.createElement('tr');
-    let videoLinks = '';
-    if (job.video_url) {
-      videoLinks = `<a href="${job.video_url}" target="_blank" class="text-teal-400">View</a>`+
-                   ` <a href="${job.video_url}" download class="text-teal-400 ml-2">Download</a>`;
+    const videoUrl = extractVideoUrlFromJob(job);
+    let videoLinks = '—';
+    if (typeof videoUrl === 'string' && videoUrl) {
+      const escapedUrl = escapeHtml(videoUrl);
+      videoLinks = `<a href="${escapedUrl}" target="_blank" rel="noopener" class="text-teal-400 underline">View</a>`+
+                   ` <a href="${escapedUrl}" download class="text-teal-400 underline ml-2">Download</a>`;
     }
     const provider = job.provider || '—';
     const requestId = job.external_job_id || '—';
@@ -295,12 +403,12 @@ async function loadJobs() {
 }
 
 async function pollJobUntilComplete(jobId, options = {}) {
-  const { interval = 5000, maxAttempts = 15, requestId = null } = options;
+  const { interval = 5000, maxAttempts = null, requestId = null } = options;
   const sequence = ++pollSequence;
   let lastStatus = null;
   let knownRequestId = requestId;
 
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+  for (let attempt = 0; maxAttempts == null || attempt < maxAttempts; attempt += 1) {
     if (sequence !== pollSequence) {
       return;
     }
@@ -365,6 +473,10 @@ async function pollJobUntilComplete(jobId, options = {}) {
       setStatus('generation', 'done', 'Video ready');
       const reqDisplay = knownRequestId ? ` (request ${knownRequestId})` : '';
       updateGenerationStatus(`Video generated successfully for job #${jobId}${reqDisplay}.`, 'success');
+      const videoUrl = extractVideoUrlFromJob(job);
+      if (videoUrl) {
+        showGenerationVideoLinks(videoUrl);
+      }
       loadJobs();
       return;
     }
@@ -412,9 +524,11 @@ async function pollJobUntilComplete(jobId, options = {}) {
   if (sequence !== pollSequence) {
     return;
   }
-  setStatus('webhook', 'error', 'Timed out waiting for webhook');
-  setStatus('generation', 'error', 'Timed out');
-  updateGenerationStatus('Timed out waiting for video generation to finish.', 'error');
+  if (maxAttempts != null) {
+    setStatus('webhook', 'error', 'Timed out waiting for webhook');
+    setStatus('generation', 'error', 'Timed out');
+    updateGenerationStatus('Timed out waiting for video generation to finish.', 'error');
+  }
 }
 
 document.getElementById('job-form').addEventListener('submit', async (e) => {
