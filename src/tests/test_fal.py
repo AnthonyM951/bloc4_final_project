@@ -1,7 +1,5 @@
 import os
 import sys
-import json
-import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 sys.path.insert(0, os.path.dirname(__file__))
@@ -16,7 +14,7 @@ def test_submit_job_fal(monkeypatch):
 
     dummy_supabase = DummySupabase()
     monkeypatch.setattr(app_module, "supabase", dummy_supabase)
-    captured: dict[str, object] = {"status_calls": [], "result_calls": []}
+    captured: dict[str, object] = {"result_calls": []}
 
     dummy_material = app_module.CourseMaterial(
         topic="Tyrannosaurus rex",
@@ -37,10 +35,6 @@ def test_submit_job_fal(monkeypatch):
         captured["model_id"] = model_id
         captured["payload"] = payload
         return "req_123"
-
-    def fake_get_status(model_id, request_id):
-        captured["status_calls"].append((model_id, request_id))
-        return {"status": "COMPLETED"}
 
     def fake_get_result(model_id, request_id):
         captured["result_calls"].append((model_id, request_id))
@@ -64,7 +58,6 @@ def test_submit_job_fal(monkeypatch):
 
     monkeypatch.setattr(app_module, "prepare_course_material", fake_prepare)
     monkeypatch.setattr(app_module, "submit_text2video", fake_submit)
-    monkeypatch.setattr(app_module, "get_status", fake_get_status)
     monkeypatch.setattr(app_module, "get_result", fake_get_result)
     monkeypatch.setattr(app_module, "Thread", ImmediateThread)
     monkeypatch.setattr(app_module, "_load_job_row", fake_load_job_row)
@@ -115,7 +108,6 @@ def test_submit_job_fal(monkeypatch):
         "acceleration": "regular",
     }
 
-    assert captured["status_calls"] == [(body["model_id"], "req_123")]
     assert captured["result_calls"] == [(body["model_id"], "req_123")]
 
     video_inserts = [

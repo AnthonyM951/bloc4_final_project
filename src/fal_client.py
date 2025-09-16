@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -7,7 +8,10 @@ import requests
 from requests import exceptions as requests_exceptions
 
 FAL_QUEUE_BASE = os.getenv("FAL_QUEUE_BASE", "https://queue.fal.run")
-FAL_KEY = os.getenv("FAL_KEY")
+FAL_KEY = os.getenv(
+    "FAL_KEY",
+    "3e9ddf21-a57e-4b69-9eb9-2d9d336acf92:0296b68b75feab14420a58c753385b05",
+)
 
 
 def _headers(json: bool = True):
@@ -26,7 +30,7 @@ def _normalize_input(input_data: str | Mapping[str, Any]) -> dict[str, Any]:
         normalized: dict[str, Any] = {
             key: value
             for key, value in input_data.items()
-            if value is not None
+            if value is not None and key != "webhook_url"
         }
     else:
         normalized = {"prompt": input_data}
@@ -37,12 +41,12 @@ def submit_text2video(
     model_id: str,
     input_data: str | Mapping[str, Any],
 ) -> str:
-    payload: dict[str, object] = _normalize_input(input_data)
+    payload: dict[str, object] = {"input": _normalize_input(input_data)}
     endpoint = f"{FAL_QUEUE_BASE.rstrip('/')}/{model_id.lstrip('/')}"
     r = requests.post(
         endpoint,
         headers=_headers(),
-        json=payload,
+        data=json.dumps(payload),
         timeout=30,
     )
     r.raise_for_status()

@@ -29,7 +29,9 @@ from supabase import create_client
 import requests
 from bs4 import BeautifulSoup
 
-from fal_client import get_result, get_status, submit_text2video
+from requests import exceptions as requests_exceptions
+
+from fal_client import get_result, submit_text2video
 
 def debug_log(func):
     """Décorateur pour tracer les appels de fonction et leurs retours."""
@@ -357,17 +359,70 @@ def _poll_fal_job(job_id: str, request_id: str, model_id: str) -> None:
     success_states = {"SUCCESS", "COMPLETED", "OK"}
     failure_states = {"FAILED", "ERROR", "CANCELLED"}
     running_states = {"PENDING", "QUEUED", "RUNNING", "IN_PROGRESS", "PROCESSING"}
+    transient_status_codes = {202, 425}
 
-    last_status: str | None = None
     consecutive_errors = 0
+    last_status_token: str | None = None
 
     while True:
         try:
-            status_payload = get_status(model_identifier, request_identifier)
+            result_payload = get_result(model_identifier, request_identifier)
+        except requests_exceptions.HTTPError as exc:
+            response = getattr(exc, "response", None)
+            status_code = getattr(response, "status_code", None)
+            if status_code in transient_status_codes:
+                consecutive_errors = 0
+                status_payload = None
+                if response is not None:
+                    try:
+                        status_payload = response.json()
+                    except Exception:
+                        status_payload = None
+                status_label = (
+                    _extract_status_label(status_payload)
+                    if status_payload is not None
+                    else None
+                )
+                if status_label:
+                    status_upper = status_label.upper()
+                    token = f"STATUS:{status_upper}"
+                    if token != last_status_token:
+                        app.logger.info(
+                            "fal.ai job %s (request=%s) status=%s",
+                            job_identifier,
+                            request_identifier,
+                            status_upper,
+                        )
+                        last_status_token = token
+                elif status_code is not None:
+                    token = f"CODE:{status_code}"
+                    if token != last_status_token:
+                        app.logger.info(
+                            "fal.ai job %s (request=%s) status_code=%s",
+                            job_identifier,
+                            request_identifier,
+                            status_code,
+                        )
+                        last_status_token = token
+                sleep(5)
+                continue
+
+            consecutive_errors += 1
+            app.logger.error(
+                "fal.ai result polling failed for job %s (attempt %s): %s",
+                job_identifier,
+                consecutive_errors,
+                exc,
+            )
+            if consecutive_errors >= 3:
+                _mark_job_failed(job_identifier, str(exc))
+                return
+            sleep(5)
+            continue
         except Exception as exc:
             consecutive_errors += 1
             app.logger.error(
-                "fal.ai status polling failed for job %s (attempt %s): %s",
+                "fal.ai result polling failed for job %s (attempt %s): %s",
                 job_identifier,
                 consecutive_errors,
                 exc,
@@ -379,63 +434,39 @@ def _poll_fal_job(job_id: str, request_id: str, model_id: str) -> None:
             continue
 
         consecutive_errors = 0
-        status_label = _extract_status_label(status_payload)
+        status_label = _extract_status_label(result_payload)
         status_upper = status_label.upper() if isinstance(status_label, str) else ""
 
         if status_upper:
-            app.logger.info(
-                "fal.ai job %s (request=%s) status=%s",
-                job_identifier,
-                request_identifier,
-                status_upper,
-            )
+            token = f"STATUS:{status_upper}"
+            if token != last_status_token:
+                app.logger.info(
+                    "fal.ai job %s (request=%s) status=%s",
+                    job_identifier,
+                    request_identifier,
+                    status_upper,
+                )
+                last_status_token = token
         else:
             app.logger.info(
-                "fal.ai job %s (request=%s) status payload=%s",
+                "fal.ai job %s (request=%s) result payload=%s",
                 job_identifier,
                 request_identifier,
-                status_payload,
+                result_payload,
             )
-
-        if (
-            status_upper
-            and status_upper not in success_states
-            and status_upper not in failure_states
-            and status_upper != last_status
-        ):
-            last_status = status_upper
-
-        if status_upper in success_states:
-            try:
-                result_payload = get_result(model_identifier, request_identifier)
-            except Exception as exc:
-                app.logger.error(
-                    "Unable to retrieve fal.ai result for job %s: %s",
-                    job_identifier,
-                    exc,
-                )
-                _mark_job_failed(job_identifier, str(exc))
-                return
-
-            job_row = _load_job_row(job_identifier) or job_row
-
-            _finalize_fal_job_success(job_row, result_payload)
-            return
 
         if status_upper in failure_states:
             job_row = _load_job_row(job_identifier) or job_row
-
-            _mark_job_failed(job_identifier, status_payload)
+            _mark_job_failed(job_identifier, result_payload)
             return
 
-        if status_upper not in running_states and status_upper:
-            app.logger.debug(
-                "Job %s received unexpected fal.ai status %s",
-                job_identifier,
-                status_upper,
-            )
+        if status_upper in running_states and status_upper not in success_states:
+            sleep(5)
+            continue
 
-        sleep(5)
+        job_row = _load_job_row(job_identifier) or job_row
+        _finalize_fal_job_success(job_row, result_payload)
+        return
 
 
 def _extract_video_details(payload: object) -> tuple[str | None, dict[str, Any]]:
