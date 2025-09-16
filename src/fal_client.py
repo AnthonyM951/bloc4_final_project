@@ -4,6 +4,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 import requests
+from requests import exceptions as requests_exceptions
 
 FAL_QUEUE_BASE = os.getenv("FAL_QUEUE_BASE", "https://queue.fal.run")
 FAL_KEY = os.getenv("FAL_KEY")
@@ -59,11 +60,31 @@ def _queue_request_url(model_id: str, *parts: str) -> str:
     return f"{FAL_QUEUE_BASE.rstrip('/')}/{base_path}"
 
 
-def get_status(model_id: str, request_id: str) -> dict:
+def get_status(
+    model_id: str, request_id: str, *, with_logs: bool = False
+) -> dict:
     endpoint = _queue_request_url(model_id, "requests", request_id, "status")
-    r = requests.get(endpoint, headers=_headers(False), timeout=30)
-    r.raise_for_status()
-    return r.json()
+    params = {"logs": "true"} if with_logs else None
+    try:
+        response = requests.get(
+            endpoint,
+            headers=_headers(False),
+            params=params,
+            timeout=30,
+        )
+        response.raise_for_status()
+    except requests_exceptions.HTTPError as exc:
+        response = getattr(exc, "response", None)
+        if response is None or response.status_code != 405:
+            raise
+        response = requests.post(
+            endpoint,
+            headers=_headers(),
+            json={"with_logs": bool(with_logs)},
+            timeout=30,
+        )
+        response.raise_for_status()
+    return response.json()
 
 
 def get_result(model_id: str, request_id: str) -> dict:
@@ -219,6 +240,16 @@ async def result_async(model_id: str, request_id: str) -> dict:
 
     payload = await asyncio.to_thread(get_result, model_id, request_id)
     return _normalize_result_payload(payload)
+
+
+async def status_async(
+    model_id: str, request_id: str, *, with_logs: bool = False
+) -> dict:
+    """Return the fal.ai status using an asynchronous interface."""
+
+    return await asyncio.to_thread(
+        get_status, model_id, request_id, with_logs=with_logs
+    )
 
 
 # Backwards compatibility helpers used by worker.py tests
