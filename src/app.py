@@ -191,17 +191,17 @@ def summarize_text(text: str) -> str:
 
 
 # 🔑 Connexion Postgres (infos depuis Supabase -> Database -> Connection info)
-try:
-    conn = psycopg2.connect(
-        host=os.getenv("SUPABASE_DB_HOST", "db.cryetaumceiljumacrww.supabase.co"),
-        dbname=os.getenv("SUPABASE_DB_NAME", "postgres"),
-        user=os.getenv("SUPABASE_DB_USER", "postgres"),
-        password=os.getenv("SUPABASE_DB_PASSWORD"),
-        port=5432,
-        sslmode="require",
-    )
-except Exception:
-    conn = None
+# try:
+#     conn = psycopg2.connect(
+#         host=os.getenv("SUPABASE_DB_HOST", "db.cryetaumceiljumacrww.supabase.co"),
+#         dbname=os.getenv("SUPABASE_DB_NAME", "postgres"),
+#         user=os.getenv("SUPABASE_DB_USER", "postgres"),
+#         password=os.getenv("SUPABASE_DB_PASSWORD"),
+#         port=5432,
+#         sslmode="require",
+#     )
+# except Exception:
+#     conn = None
 
 # 🔑 Client Supabase pour Auth
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -285,44 +285,13 @@ def index():
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
-    """Connexion utilisateur"""
     if request.method == "POST":
         data = request.get_json(silent=True) or request.form
         email = data.get("email", "")
         password = data.get("password", "")
 
         if supabase is None:
-            # Fallback mode when Supabase isn't configured: accept provided user_id or email
-            user_id = data.get("user_id") or email
-            if not user_id:
-                return jsonify({"error": "Supabase client not available"}), 500
-
-            session["user_id"] = user_id
-            session["email"] = email
-
-            profile_payload = {"user_id": user_id, "email": email}
-            session["role"] = "user"
-            if conn:
-                try:
-                    conn.rollback()
-                    with conn.cursor() as cur:
-                        cur.execute(
-                            "SELECT role, gpu_minutes_quota FROM profiles WHERE user_id = %s",
-                            (user_id,),
-                        )
-                        row = cur.fetchone()
-                        if row:
-                            session["role"] = row[0]
-                            session["gpu_minutes_quota"] = row[1]
-                            profile_payload.update(
-                                {"role": row[0], "gpu_minutes_quota": row[1]}
-                            )
-                except Exception:
-                    conn.rollback()
-
-            if request.is_json:
-                return jsonify(profile_payload), 200
-            return redirect(url_for("dashboard"))
+            return jsonify({"error": "Supabase client not available"}), 500
 
         try:
             auth_resp = supabase.auth.sign_in_with_password(
@@ -337,29 +306,19 @@ def login():
 
             profile_payload = {"user_id": user.id, "email": email}
             session["role"] = "user"
-            if conn:
-                # Ensure the connection is in a clean state before querying
-                conn.rollback()
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT role, gpu_minutes_quota FROM profiles WHERE user_id = %s",
-                        (user.id,),
-                    )
-                    row = cur.fetchone()
-                    if row:
-                        session["role"] = row[0]
-                        session["gpu_minutes_quota"] = row[1]
-                        profile_payload.update(
-                            {"role": row[0], "gpu_minutes_quota": row[1]}
-                        )
+
+            res = supabase.table("profiles").select("role, gpu_minutes_quota").eq("user_id", user.id).execute()
+            if res.data:
+                profile = res.data[0]
+                session["role"] = profile["role"]
+                session["gpu_minutes_quota"] = profile["gpu_minutes_quota"]
+                profile_payload.update(profile)
 
             if request.is_json:
                 return jsonify(profile_payload), 200
             return redirect(url_for("dashboard"))
 
         except Exception as e:
-            if conn:
-                conn.rollback()
             return jsonify({"error": str(e)}), 400
 
     return render_template("login.html")
@@ -374,7 +333,6 @@ def logout():
 
 @app.route("/register", methods=["GET", "POST"])
 def register():
-    """Inscription utilisateur"""
     if request.method == "POST":
         data = request.get_json(silent=True) or request.form
         username = data.get("username", "")
@@ -392,34 +350,23 @@ def register():
 
         if supabase is None:
             return jsonify({"error": "Supabase client not available"}), 500
-        if conn is None:
-            return jsonify({"error": "Database connection not available"}), 500
 
         try:
-            # 1️⃣ Créer l’utilisateur dans auth.users
             auth_resp = supabase.auth.sign_up({"email": email, "password": password})
             user = getattr(auth_resp, "user", None)
             if not user or not getattr(user, "id", None):
                 raise ValueError("Supabase signup failed")
             user_id = user.id
 
-            # 2️⃣ Créer le profil applicatif
-            conn.rollback()
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO profiles (user_id, role, gpu_minutes_quota)
-                    VALUES (%s, %s, %s)
-                    ON CONFLICT (user_id) DO NOTHING
-                    """,
-                    (user_id, "user", 120),
-                )
-                conn.commit()
+            supabase.table("profiles").insert({
+                "user_id": user_id,
+                "role": "user",
+                "gpu_minutes_quota": 120
+            }).execute()
 
             return jsonify({"user_id": user_id, "username": clean_username}), 201
 
         except Exception as e:
-            conn.rollback()
             return jsonify({"error": str(e)}), 400
 
     return render_template("register.html")
@@ -619,9 +566,8 @@ def wiki_summary():
 
 @app.post("/submit_job")
 def submit_job():
-    """Créer un job vidéo"""
-    if conn is None:
-        return jsonify({"error": "Database connection not available"}), 500
+    if supabase is None:
+        return jsonify({"error": "Supabase not available"}), 500
 
     data = request.get_json(force=True)
     user_id = data.get("user_id")
@@ -629,40 +575,33 @@ def submit_job():
     params = data.get("params", {})
 
     try:
-        conn.rollback()
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO jobs (user_id, prompt, params)
-                VALUES (%s, %s, %s)
-                RETURNING id, status, submitted_at
-                """,
-                (user_id, prompt, json.dumps(params)),
-            )
-            job = cur.fetchone()
-            conn.commit()
-        job_id = job[0]
+        res = supabase.table("jobs").insert({
+            "user_id": user_id,
+            "prompt": prompt,
+            "params": params,
+            "status": "queued",
+            "provider": "local"
+        }).execute()
+        job = res.data[0]
+        job_id = job["id"]
 
-        # Déclenche le worker Celery si disponible
         if process_video_job is not None:
             try:
                 process_video_job.delay(job_id)
             except Exception:
                 pass
 
-        return (
-            jsonify(
-                {"id": job_id, "status": job[1], "submitted_at": job[2].isoformat()}
-            ),
-            201,
-        )
+        return jsonify(job), 201
     except Exception as e:
-        conn.rollback()
         return jsonify({"error": str(e)}), 400
 
 
 @app.post("/webhooks/fal")
 def fal_webhook():
+    """Réception des webhooks fal.ai (succès, erreur, en cours)."""
+    if supabase is None:
+        return jsonify({"error": "Supabase not available"}), 500
+
     payload = request.get_json(force=True)
     request_id = payload.get("request_id") or payload.get("id")
     status = payload.get("status")
@@ -672,51 +611,43 @@ def fal_webhook():
         return jsonify({"error": "missing request_id"}), 400
 
     try:
-        conn.rollback()
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT id, user_id FROM jobs WHERE external_job_id=%s",
-                (request_id,),
-            )
-            row = cur.fetchone()
-            if not row:
-                return jsonify({"error": "job not found"}), 404
-            job_id, user_id = row
+        res = supabase.table("jobs").select("id, user_id").eq("external_job_id", request_id).execute()
+        if not res.data:
+            return jsonify({"error": "job not found"}), 404
 
-            if status == "SUCCESS":
-                cur.execute(
-                    """
-                    INSERT INTO videos (job_id, user_id, title, source_url)
-                    VALUES (%s, %s, %s, %s)
-                    """,
-                    (job_id, user_id, "Video (fal.ai)", video_url),
-                )
-                cur.execute(
-                    "UPDATE jobs SET status='succeeded', finished_at=now() WHERE id=%s",
-                    (job_id,),
-                )
-            elif status in ("FAILED", "ERROR"):
-                cur.execute(
-                    "UPDATE jobs SET status='failed', error=%s WHERE id=%s",
-                    (payload.get("error") or "fal error", job_id),
-                )
-            else:
-                cur.execute(
-                    "UPDATE jobs SET status='running' WHERE id=%s",
-                    (job_id,),
-                )
-            conn.commit()
+        job = res.data[0]
+        job_id = job["id"]
+        user_id = job["user_id"]
+
+        if status == "SUCCESS":
+            # Crée une entrée dans la table videos
+            supabase.table("videos").insert({
+                "job_id": job_id,
+                "user_id": user_id,
+                "title": "Video (fal.ai)",
+                "source_url": video_url
+            }).execute()
+            supabase.table("jobs").update({"status": "succeeded", "finished_at": "now()"}).eq("id", job_id).execute()
+
+        elif status in ("FAILED", "ERROR"):
+            supabase.table("jobs").update({
+                "status": "failed",
+                "error": payload.get("error") or "fal error"
+            }).eq("id", job_id).execute()
+
+        else:
+            supabase.table("jobs").update({"status": "running"}).eq("id", job_id).execute()
+
+        return jsonify({"ok": True})
+
     except Exception as e:
-        conn.rollback()
         return jsonify({"error": str(e)}), 500
-
-    return jsonify({"ok": True})
 
 
 @app.post("/submit_job_fal")
 def submit_job_fal():
-    if conn is None:
-        return jsonify({"error": "Database connection not available"}), 500
+    if supabase is None:
+        return jsonify({"error": "Supabase not available"}), 500
 
     data = request.get_json(force=True)
     user_id = data.get("user_id")
@@ -724,306 +655,143 @@ def submit_job_fal():
     model_id = data.get("model_id", MODEL_DEFAULT)
 
     try:
-        conn.rollback()
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO jobs (user_id, prompt, params, status, provider)
-                VALUES (%s, %s, %s, 'queued', 'fal')
-                RETURNING id
-                """,
-                (user_id, prompt, json.dumps({"model_id": model_id})),
-            )
-            job_id = cur.fetchone()[0]
-            conn.commit()
+        res = supabase.table("jobs").insert({
+            "user_id": user_id,
+            "prompt": prompt,
+            "params": {"model_id": model_id},
+            "status": "queued",
+            "provider": "fal"
+        }).execute()
+        job_id = res.data[0]["id"]
     except Exception as e:
-        conn.rollback()
         return jsonify({"error": str(e)}), 400
 
     try:
         external_id = submit_text2video(model_id, prompt, webhook_url=None)
-        with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE jobs SET external_job_id=%s WHERE id=%s",
-                (external_id, job_id),
-            )
-            conn.commit()
+        supabase.table("jobs").update({"external_job_id": external_id}).eq("id", job_id).execute()
     except Exception as e:
         return jsonify({"error": f"Fal submission failed: {e}"}), 502
 
-    return (
-        jsonify({"job_id": job_id, "external_job_id": external_id, "status": "queued"}),
-        202,
-    )
+    return jsonify({"job_id": job_id, "external_job_id": external_id, "status": "queued"}), 202
+
 
 
 @app.get("/list_jobs/<user_id>")
 def list_jobs(user_id):
-    """Lister les jobs d’un utilisateur"""
-    if conn is None:
-        return jsonify({"error": "Database connection not available"}), 500
-
+    if supabase is None:
+        return jsonify({"error": "Supabase not available"}), 500
     try:
-        conn.rollback()
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT j.id, j.prompt, j.status, j.submitted_at,
-                       f.bucket, f.path
-                FROM jobs j
-                LEFT JOIN videos v ON v.job_id = j.id
-                LEFT JOIN files f ON f.id = v.file_id
-                WHERE j.user_id = %s
-                ORDER BY j.submitted_at DESC
-                """,
-                (user_id,),
-            )
-            rows = cur.fetchall()
-        base_url = (
-            f"{SUPABASE_URL}/storage/v1/object/public" if SUPABASE_URL else ""
-        )
-        jobs = [
-            {
-                "id": r[0],
-                "prompt": r[1],
-                "status": r[2],
-                "submitted_at": r[3].isoformat(),
-                "video_url": f"{base_url}/{r[4]}/{r[5]}" if r[4] and r[5] else None,
-            }
-            for r in rows
-        ]
+        res = supabase.table("jobs").select("*").eq("user_id", user_id).order("submitted_at", desc=True).execute()
+        jobs = res.data
         return jsonify(jobs)
     except Exception as e:
-        if conn:
-            conn.rollback()
         return jsonify({"error": str(e)}), 400
 
 
 @app.get("/get_videos/<user_id>")
 def get_videos(user_id):
-    if conn is None:
-        return jsonify({"error": "Database connection not available"}), 500
+    if supabase is None:
+        return jsonify({"error": "Supabase not available"}), 500
     try:
-        conn.rollback()
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT v.id, v.title, f.bucket, f.path
-                FROM videos v
-                LEFT JOIN files f ON f.id = v.file_id
-                WHERE v.user_id = %s
-                ORDER BY v.created_at DESC
-                """,
-                (user_id,),
-            )
-            rows = cur.fetchall()
-        base_url = (
-            f"{SUPABASE_URL}/storage/v1/object/public" if SUPABASE_URL else ""
-        )
-        videos = [
-            {
-                "id": r[0],
-                "title": r[1],
-                "url": f"{base_url}/{r[2]}/{r[3]}" if r[2] and r[3] else None,
-            }
-            for r in rows
-        ]
+        res = supabase.table("videos").select("*").eq("user_id", user_id).order("created_at", desc=True).execute()
+        videos = res.data
         return jsonify(videos)
     except Exception as e:
-        if conn:
-            conn.rollback()
         return jsonify({"error": str(e)}), 400
 
 
 @app.get("/admin/list_jobs")
 @require_admin
 def admin_list_jobs():
-    """Lister tous les jobs (admin)"""
-    if conn is None:
-        return jsonify({"error": "Database connection not available"}), 500
+    if supabase is None:
+        return jsonify({"error": "Supabase not available"}), 500
     try:
-        conn.rollback()
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT j.id, j.user_id, j.prompt, j.status, j.submitted_at,
-                       f.bucket, f.path
-                FROM jobs j
-                LEFT JOIN videos v ON v.job_id = j.id
-                LEFT JOIN files f ON f.id = v.file_id
-                ORDER BY j.submitted_at DESC
-                """,
-            )
-            rows = cur.fetchall()
-        base_url = (
-            f"{SUPABASE_URL}/storage/v1/object/public" if SUPABASE_URL else ""
-        )
-        jobs = [
-            {
-                "id": r[0],
-                "user_id": r[1],
-                "prompt": r[2],
-                "status": r[3],
-                "submitted_at": r[4].isoformat(),
-                "video_url": f"{base_url}/{r[5]}/{r[6]}" if r[5] and r[6] else None,
-            }
-            for r in rows
-        ]
+        res = supabase.table("jobs").select("*").order("submitted_at", desc=True).execute()
+        jobs = res.data
         return jsonify(jobs)
     except Exception as e:
-        if conn:
-            conn.rollback()
         return jsonify({"error": str(e)}), 400
 
 
 @app.get("/admin/list_users")
 @require_admin
 def admin_list_users():
-    """Lister les utilisateurs"""
-    if conn is None:
-        return jsonify({"error": "Database connection not available"}), 500
+    if supabase is None:
+        return jsonify({"error": "Supabase not available"}), 500
     try:
-        conn.rollback()
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT user_id, role, gpu_minutes_quota FROM profiles ORDER BY user_id",
-            )
-            rows = cur.fetchall()
-        users = [
-            {"user_id": r[0], "role": r[1], "gpu_minutes_quota": r[2]}
-            for r in rows
-        ]
-        return jsonify(users)
+        res = supabase.table("profiles").select("user_id, role, gpu_minutes_quota").order("user_id").execute()
+        return jsonify(res.data)
     except Exception as e:
-        if conn:
-            conn.rollback()
         return jsonify({"error": str(e)}), 400
 
 
 @app.get("/admin/kpis")
 @require_admin
 def admin_kpis():
-    """Agrégations journalières pour le tableau de bord admin"""
-    if conn is None:
-        return jsonify({"error": "Database connection not available"}), 500
-
+    if supabase is None:
+        return jsonify({"error": "Supabase not available"}), 500
     try:
-        conn.rollback()
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                select job_date,
-                       jobs_total,
-                       jobs_succeeded,
-                       jobs_failed,
-                       active_users,
-                       avg_duration_seconds,
-                       p50_duration_seconds,
-                       success_rate,
-                       updated_at
-                from kpi_spark_daily
-                order by job_date desc
-                limit 30
-                """,
-            )
-            rows = cur.fetchall()
-        data = []
-        for job_date, jobs_total, jobs_succeeded, jobs_failed, active_users, avg_duration, p50_duration, success_rate, updated_at in rows:
-            data.append(
-                {
-                    "day": job_date.isoformat() if job_date else None,
-                    "jobs_total": int(jobs_total or 0),
-                    "jobs_succeeded": int(jobs_succeeded or 0),
-                    "jobs_failed": int(jobs_failed or 0),
-                    "active_users": int(active_users or 0),
-                    "avg_duration_seconds": float(avg_duration) if avg_duration is not None else None,
-                    "p50_duration_seconds": float(p50_duration) if p50_duration is not None else None,
-                    "success_rate": float(success_rate) if success_rate is not None else None,
-                    "updated_at": updated_at.isoformat() if updated_at else None,
-                }
-            )
-        return jsonify(data)
+        res = supabase.table("kpi_spark_daily").select("*").order("job_date", desc=True).limit(30).execute()
+        return jsonify(res.data)
     except Exception as e:
-        if conn:
-            conn.rollback()
         return jsonify({"error": str(e)}), 400
 
 
 def _sync_fal_jobs():
-    if conn is None:
-        return
-    try:
-        conn.rollback()
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT id, external_job_id, COALESCE(params->>'model_id', %s)
-                FROM jobs
-                WHERE provider='fal'
-                  AND status IN ('queued','running')
-                  AND external_job_id IS NOT NULL
-                LIMIT 20
-                """,
-                (MODEL_DEFAULT,),
-            )
-            jobs = cur.fetchall()
-    except Exception:
-        if conn:
-            conn.rollback()
+    """Synchronise l'état des jobs fal.ai encore en attente."""
+    if supabase is None:
         return
 
-    for job_id, req_id, model_id in jobs:
+    try:
+        res = supabase.table("jobs").select("id, external_job_id, params, user_id")\
+            .eq("provider", "fal")\
+            .in_("status", ["queued", "running"])\
+            .not_.is_("external_job_id", None)\
+            .limit(20).execute()
+
+        jobs = res.data
+    except Exception:
+        return
+
+    for job in jobs:
+        job_id = job["id"]
+        req_id = job.get("external_job_id")
+        user_id = job.get("user_id")
+        params = job.get("params") or {}
+        model_id = params.get("model_id", MODEL_DEFAULT)
+
         try:
             st = get_status(model_id, req_id)
             s = (st.get("status") or "").upper()
+
             if s in ("QUEUED", "IN_PROGRESS"):
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "UPDATE jobs SET status='running', started_at=COALESCE(started_at, now()) WHERE id=%s",
-                        (job_id,),
-                    )
-                    conn.commit()
+                supabase.table("jobs").update({
+                    "status": "running",
+                    "started_at": "now()"
+                }).eq("id", job_id).execute()
+
             elif s == "SUCCESS":
                 res = get_result(model_id, req_id)
                 video_url = (res.get("video") or {}).get("url")
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT user_id FROM jobs WHERE id=%s",
-                        (job_id,),
-                    )
-                    user_id = cur.fetchone()[0]
-                    cur.execute(
-                        """
-                        INSERT INTO videos (job_id, user_id, title, source_url)
-                        VALUES (%s, %s, %s, %s)
-                        ON CONFLICT (job_id) DO NOTHING
-                        """,
-                        (job_id, user_id, "Video (fal.ai)", video_url),
-                    )
-                    cur.execute(
-                        "UPDATE jobs SET status='succeeded', finished_at=now() WHERE id=%s",
-                        (job_id,),
-                    )
-                    conn.commit()
+                supabase.table("videos").insert({
+                    "job_id": job_id,
+                    "user_id": user_id,
+                    "title": "Video (fal.ai)",
+                    "source_url": video_url
+                }).execute()
+                supabase.table("jobs").update({
+                    "status": "succeeded",
+                    "finished_at": "now()"
+                }).eq("id", job_id).execute()
+
             elif s in ("FAILED", "ERROR"):
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "UPDATE jobs SET status='failed', error=%s WHERE id=%s",
-                        (st.get("error") or "fal error", job_id),
-                    )
-                    conn.commit()
+                supabase.table("jobs").update({
+                    "status": "failed",
+                    "error": st.get("error") or "fal error"
+                }).eq("id", job_id).execute()
+
         except Exception:
-            if conn:
-                conn.rollback()
             continue
 
-
-try:  # pragma: no cover
-    scheduler.add_job(_sync_fal_jobs, "interval", seconds=30, id="fal_sync")
-    scheduler.start()
-except Exception:
-    pass
-
-
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(host="0.0.0.0", port=5000, debug=True)
