@@ -32,6 +32,35 @@ from bs4 import BeautifulSoup
 from fal_client import get_result, get_status, submit_text2video
 from fal_webhook import FalWebhookVerificationError, verify_fal_webhook
 
+def debug_log(func):
+    """Décorateur pour tracer les appels de fonction et leurs retours."""
+
+    import functools
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        print(f"[DEBUG] >>> {func.__name__} called")
+        if args:
+            print(f"        args={args}")
+        if kwargs:
+            print(f"        kwargs={kwargs}")
+        try:
+            result = func(*args, **kwargs)
+            print(f"[DEBUG] <<< {func.__name__} returned {type(result)}")
+            return result
+        except Exception as e:
+            print(f"[DEBUG] !!! {func.__name__} raised {e}")
+            raise
+
+    return wrapper
+
+import types
+
+for name, obj in list(globals().items()):
+    if isinstance(obj, types.FunctionType) and not name.startswith("_debug"):
+        globals()[name] = debug_log(obj)
+
+
 try:  # pragma: no cover
     from worker import process_video_job  # type: ignore
 except Exception:  # pragma: no cover
