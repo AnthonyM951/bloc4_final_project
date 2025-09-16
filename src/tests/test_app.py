@@ -1,6 +1,8 @@
 import os
 import sys
 
+import requests
+
 # Ajoute le répertoire parent au PYTHONPATH pour import local
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
@@ -192,10 +194,10 @@ def test_wiki_summary(monkeypatch):
         return ["python", "language"]
 
     def fake_search(keywords):
-        return {k: ["http://example.com"] for k in keywords}
+        return ({k: ["http://example.com"] for k in keywords}, {})
 
     def fake_scrape(url):
-        return "Python is a programming language."  # pragma: no cover
+        return "Python is a programming language.", None  # pragma: no cover
 
     def fake_summary(text):
         return "summary"  # pragma: no cover
@@ -210,6 +212,68 @@ def test_wiki_summary(monkeypatch):
     data = resp.get_json()
     assert data["keywords"] == ["python", "language"]
     assert data["summary"] == "summary"
+
+
+def test_wiki_summary_reports_errors(monkeypatch):
+    client = app.test_client()
+
+    def fake_extract(text):
+        return ["python"]
+
+    def fake_search(keywords):
+        return ({kw: [] for kw in keywords}, {"python": "403 Forbidden"})
+
+    def fake_scrape(url):
+        return "", "timeout"  # pragma: no cover
+
+    monkeypatch.setattr(app_module, "extract_keywords", fake_extract)
+    monkeypatch.setattr(app_module, "wikipedia_search", fake_search)
+    monkeypatch.setattr(app_module, "scrape_and_clean", fake_scrape)
+
+    resp = client.post("/wiki_summary", json={"query": "Python"})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["summary"] == ""
+    assert "errors" in data
+    assert any("python" in message for message in data["errors"])
+
+
+def test_wikipedia_search_uses_user_agent(monkeypatch):
+    captured: dict[str, dict[str, str]] = {}
+
+    class DummyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"query": {"search": [{"title": "Python"}]}}
+
+    def fake_get(url, params=None, headers=None, timeout=None):  # pragma: no cover
+        captured["headers"] = headers
+        return DummyResponse()
+
+    monkeypatch.setattr(app_module.requests, "get", fake_get)
+    results, errors = app_module.wikipedia_search(["python"])
+
+    assert results["python"] == ["https://en.wikipedia.org/wiki/Python"]
+    assert errors == {}
+    assert captured["headers"]["User-Agent"] == app_module.WIKIPEDIA_USER_AGENT
+    assert captured["headers"]["Accept"] == "application/json"
+
+
+def test_wikipedia_search_handles_http_error(monkeypatch):
+    def fake_get(url, params=None, headers=None, timeout=None):  # pragma: no cover
+        class DummyResponse:
+            def raise_for_status(self):
+                raise requests.exceptions.HTTPError("403 Client Error")
+
+        return DummyResponse()
+
+    monkeypatch.setattr(app_module.requests, "get", fake_get)
+    results, errors = app_module.wikipedia_search(["python"])
+
+    assert results == {"python": []}
+    assert "python" in errors
 
 
 def test_dashboard_displays_ollama_status(monkeypatch):
