@@ -57,14 +57,17 @@ def test_submit_text2video_flattens_payload(capture_post):
         {
             "prompt": "hello",
             "voice": "Brian",
+            "webhook_url": "https://example.com/webhooks/fal",
         },
     )
 
     assert req_id == "req-123"
     payload = json.loads(capture_post["data"])
-    assert payload["input"]["prompt"] == "hello"
-    assert payload["input"]["voice"] == "Brian"
-    assert "webhook_url" not in payload["input"]
+    assert payload == {
+        "prompt": "hello",
+        "voice": "Brian",
+        "webhook_url": "https://example.com/webhooks/fal",
+    }
     assert capture_post["headers"].get("Authorization", "").startswith("Key ")
 
 
@@ -75,7 +78,7 @@ def test_submit_text2video_accepts_string_input(capture_post):
     )
 
     payload = json.loads(capture_post["data"])
-    assert payload == {"input": {"prompt": "a smiling teacher"}}
+    assert payload == {"prompt": "a smiling teacher"}
 
 
 @pytest.mark.anyio("asyncio")
