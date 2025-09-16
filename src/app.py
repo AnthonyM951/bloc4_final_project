@@ -4,10 +4,8 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import wraps
-from threading import Lock
-from time import monotonic, time
+from time import time
 from typing import Any, Mapping, Sequence
-from apscheduler.schedulers.background import BackgroundScheduler
 from flask import (
     Flask,
     Response,
@@ -30,7 +28,7 @@ from supabase import create_client
 import requests
 from bs4 import BeautifulSoup
 
-from fal_client import get_result, get_status, submit_text2video
+from fal_client import submit_text2video
 from fal_webhook import FalWebhookVerificationError, verify_fal_webhook
 
 try:  # pragma: no cover
@@ -52,40 +50,6 @@ VERIFY_FAL_WEBHOOKS = os.getenv("FAL_VERIFY_WEBHOOKS", "1").lower() not in {
     "no",
 }
 
-scheduler = BackgroundScheduler(daemon=True)
-
-def _read_int_env(name: str, default: int, *, minimum: int | None = None) -> int:
-    """Return ``name`` as integer with fallback to ``default`` and ``minimum``."""
-
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return default
-    if minimum is not None and value < minimum:
-        return minimum
-    return value
-
-
-FAL_WEBHOOK_TIMEOUT_SECONDS = max(_read_int_env("FAL_WEBHOOK_TIMEOUT_SECONDS", 600), 0)
-FAL_QUEUE_POLL_INTERVAL_SECONDS = max(_read_int_env("FAL_QUEUE_POLL_INTERVAL", 30), 5)
-FAL_QUEUE_RETRY_INTERVAL_SECONDS = max(
-    _read_int_env("FAL_QUEUE_RETRY_INTERVAL", 60),
-    FAL_QUEUE_POLL_INTERVAL_SECONDS,
-    5,
-)
-
-
-@dataclass
-class _PendingFalJob:
-    job_id: str        # UUID string, plus int
-    model_id: str
-    deadline: float
-    retries: int = 0
-
-
 @dataclass
 class CourseMaterial:
     """Container for the pedagogical assets prepared for a video lesson."""
@@ -96,12 +60,6 @@ class CourseMaterial:
     script: str
     animation_prompt: str
     errors: list[str]
-
-
-_pending_fal_jobs: dict[str, _PendingFalJob] = {}
-_pending_jobs_lock = Lock()
-_scheduler_started = False
-_QUEUE_WATCHDOG_JOB_ID = "fal_queue_watchdog"
 
 # Regex pour validation email et mot de passe
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -182,34 +140,6 @@ def _stringify_error_detail(value: object, default: str = "fal error") -> str:
         return str(value)
 
 
-def _update_pending_job(
-    request_id: str, *, deadline: float | None = None, increment_retry: bool = False
-) -> None:
-    with _pending_jobs_lock:
-        entry = _pending_fal_jobs.get(request_id)
-        if entry is None:
-            return
-        if deadline is not None:
-            entry.deadline = deadline
-        if increment_retry:
-            entry.retries += 1
-
-
-def _clear_pending_fal_job(
-    request_id: str | None = None, *, job_id: str | None = None
-) -> None:
-    """Retire un job de la liste des jobs en attente."""
-    with _pending_jobs_lock:
-        removed = False
-        if request_id:
-            removed = _pending_fal_jobs.pop(request_id, None) is not None
-        if not removed and job_id is not None:
-            for key, entry in list(_pending_fal_jobs.items()):
-                if entry.job_id == str(job_id):  # ✅ comparer en string
-                    _pending_fal_jobs.pop(key, None)
-
-
-
 def _coerce_mapping(value: object) -> dict[str, Any]:
     """Convert Supabase JSON/text payloads into dictionaries."""
 
@@ -225,16 +155,14 @@ def _coerce_mapping(value: object) -> dict[str, Any]:
     return {}
 
 
-def _normalize_job_id(value: object) -> int | None:
-    """Convert Supabase identifiers to integers when possible."""
+def _normalize_job_id(value: object) -> str | int | None:
+    """Return a comparable identifier for Supabase job rows."""
 
     if isinstance(value, int):
         return value
-    if isinstance(value, str) and value.strip():
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return None
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped or None
     return None
 
 
@@ -559,163 +487,6 @@ def _finalize_fal_job_success(
         }).eq("id", job_id).execute()
     except Exception as exc:
         app.logger.error("❌ Unable to mark job %s as succeeded: %s", job_id, exc)
-
-
-
-def _process_pending_fal_jobs() -> None:
-    """Fallback watchdog qui vérifie les jobs encore en attente (UUID ok)."""
-
-    if supabase is None:
-        return
-
-    with _pending_jobs_lock:
-        items = list(_pending_fal_jobs.items())
-    if not items:
-        return
-
-    now = monotonic()
-    for request_id, pending in items:
-        if now < pending.deadline:
-            continue
-
-        try:
-            job_res = (
-                supabase.table("jobs")
-                .select("id, user_id, status, params, prompt")
-                .eq("id", pending.job_id)   # ✅ UUID direct
-                .limit(1)
-                .execute()
-            )
-        except Exception as exc:
-            app.logger.debug("Queue watchdog could not load job %s: %s", pending.job_id, exc)
-            _update_pending_job(
-                request_id,
-                deadline=now + FAL_QUEUE_RETRY_INTERVAL_SECONDS,
-                increment_retry=True,
-            )
-            continue
-
-        rows = getattr(job_res, "data", None) or []
-        if not rows:
-            _clear_pending_fal_job(request_id)
-            continue
-
-        job = rows[0]
-        job_id = job["id"]
-
-        status_value = (job.get("status") or "").lower()
-        if status_value in {"succeeded", "failed"}:
-            _clear_pending_fal_job(request_id)
-            continue
-
-        params = job.get("params") if isinstance(job.get("params"), Mapping) else {}
-        model_id = pending.model_id or params.get("model_id") or MODEL_DEFAULT
-        if not model_id:
-            app.logger.debug("Queue watchdog missing model for job %s", pending.job_id)
-            _clear_pending_fal_job(request_id)
-            continue
-
-        try:
-            status_payload = get_status(model_id, request_id)
-        except Exception as exc:
-            app.logger.debug("Queue watchdog status fetch failed for %s: %s", request_id, exc)
-            _update_pending_job(
-                request_id,
-                deadline=now + FAL_QUEUE_RETRY_INTERVAL_SECONDS,
-                increment_retry=True,
-            )
-            continue
-
-        status_upper = (status_payload.get("status") or "").upper()
-
-        if status_upper in {"COMPLETED", "SUCCESS", "OK"}:
-            try:
-                result_payload = get_result(model_id, request_id)
-                _finalize_fal_job_success(job, result_payload)
-            except Exception as exc:
-                app.logger.exception("Queue watchdog failed to finalize job %s: %s", request_id, exc)
-            _clear_pending_fal_job(request_id, job_id=job_id)
-
-        elif status_upper in {"FAILED", "ERROR", "CANCELLED"}:
-            try:
-                message = _mark_job_failed(job_id, status_payload)
-            except Exception as exc:
-                app.logger.exception("Queue watchdog failed to mark job %s as failed: %s", request_id, exc)
-            else:
-                app.logger.error("fal.ai job %s failed via queue fallback: %s", request_id, message)
-            _clear_pending_fal_job(request_id, job_id=job_id)
-
-        elif status_upper in {"IN_PROGRESS", "PROCESSING"}:
-            try:
-                supabase.table("jobs").update({
-                    "status": "running",
-                    "started_at": current_timestamp(),
-                }).eq("id", job_id).execute()
-            except Exception:
-                pass
-            _update_pending_job(request_id, deadline=now + FAL_QUEUE_POLL_INTERVAL_SECONDS)
-
-        elif status_upper in {"IN_QUEUE", "QUEUED"}:
-            _update_pending_job(request_id, deadline=now + FAL_QUEUE_POLL_INTERVAL_SECONDS)
-
-        else:
-            _update_pending_job(
-                request_id,
-                deadline=now + FAL_QUEUE_POLL_INTERVAL_SECONDS,
-                increment_retry=True,
-            )
-
-
-
-def _ensure_scheduler_started() -> None:
-    """Start the APScheduler watchdog for pending fal.ai jobs."""
-
-    global _scheduler_started
-    if _scheduler_started or FAL_WEBHOOK_TIMEOUT_SECONDS <= 0:
-        return
-
-    try:
-        if scheduler.get_job(_QUEUE_WATCHDOG_JOB_ID) is None:
-            scheduler.add_job(
-                _process_pending_fal_jobs,
-                "interval",
-                seconds=FAL_QUEUE_POLL_INTERVAL_SECONDS,
-                id=_QUEUE_WATCHDOG_JOB_ID,
-                max_instances=1,
-                replace_existing=True,
-            )
-        if not scheduler.running:
-            scheduler.start()
-        _scheduler_started = True
-    except Exception as exc:  # pragma: no cover - scheduler failure logged
-        app.logger.warning("Unable to start fal.ai queue watchdog: %s", exc)
-
-
-def _register_pending_fal_job(
-    request_id: str | None, job_id: str | None, model_id: str | None
-) -> None:
-    """Register a pending fal.ai job so the watchdog can track it."""
-    if (
-        not request_id
-        or not job_id
-        or FAL_WEBHOOK_TIMEOUT_SECONDS <= 0
-    ):
-        return
-
-    resolved_model = model_id or MODEL_DEFAULT
-    if not resolved_model:
-        return
-
-    deadline = monotonic() + FAL_WEBHOOK_TIMEOUT_SECONDS
-    with _pending_jobs_lock:
-        _pending_fal_jobs[request_id] = _PendingFalJob(
-            job_id=str(job_id),  # 🔑 garder UUID en string
-            model_id=resolved_model,
-            deadline=deadline,
-        )
-
-    _ensure_scheduler_started()
-
 
 def sanitize_text(text: str) -> str:
     """Nettoyer le texte : autoriser seulement alphanumérique, tiret, underscore"""
@@ -1430,10 +1201,6 @@ def fal_webhook():
 
         if status_upper in {"SUCCESS", "OK", "COMPLETED"}:
             _finalize_fal_job_success(job, result_payload)
-            if request_id:
-                _clear_pending_fal_job(request_id, job_id=job_id)
-            if gateway_request_id:
-                _clear_pending_fal_job(gateway_request_id, job_id=job_id)
 
         elif status_upper in {"FAILED", "ERROR", "CANCELLED"}:
             error_detail = _normalize_error_message(payload, result_payload)
@@ -1448,10 +1215,6 @@ def fal_webhook():
                 "status": "failed",
                 "error": normalized_error
             }).eq("id", job_id).execute()
-            if request_id:
-                _clear_pending_fal_job(request_id, job_id=job_id)
-            if gateway_request_id:
-                _clear_pending_fal_job(gateway_request_id, job_id=job_id)
 
         else:
             supabase.table("jobs").update({"status": "running"}).eq("id", job_id).execute()
@@ -1574,7 +1337,6 @@ def submit_job_fal():
         )
         external_id = submit_text2video(model_id, fal_input, webhook_url=webhook_url)
         supabase.table("jobs").update({"external_job_id": external_id}).eq("id", job_id).execute()
-        _register_pending_fal_job(external_id, job_id, model_id)
     except Exception as e:
         app.logger.exception(
             "Fal submission failed for job %s with model %s", job_id, model_id
@@ -1696,58 +1458,5 @@ def admin_kpis():
         return jsonify({"error": str(e)}), 400
 
 
-def _sync_fal_jobs():
-    """Synchronise l'état des jobs fal.ai encore en attente (UUID ok)."""
-    if supabase is None:
-        return
-
-    try:
-        res = (
-            supabase.table("jobs")
-            .select("id, external_job_id, params, user_id, prompt")
-            .eq("provider", "fal")
-            .in_("status", ["queued", "running"])
-            .not_.is_("external_job_id", None)
-            .limit(20)
-            .execute()
-        )
-        jobs = res.data
-    except Exception:
-        return
-
-    for job in jobs:
-        job_id = job["id"]  # ✅ UUID string
-        req_id = job.get("external_job_id")
-        if not req_id:
-            continue
-
-        params_raw = job.get("params")
-        params = params_raw if isinstance(params_raw, Mapping) else {}
-        model_id = params.get("model_id") or MODEL_DEFAULT
-        if not model_id:
-            continue
-
-        try:
-            st = get_status(model_id, req_id)
-            s = (st.get("status") or "").upper()
-
-            if s in {"QUEUED", "IN_QUEUE", "IN_PROGRESS", "PROCESSING"}:
-                supabase.table("jobs").update({
-                    "status": "running",
-                    "started_at": current_timestamp()
-                }).eq("id", job_id).execute()
-
-            elif s in {"SUCCESS", "OK", "COMPLETED"}:
-                res = get_result(model_id, req_id)
-                _finalize_fal_job_success(job, res)
-                _clear_pending_fal_job(req_id, job_id=job_id)
-
-            elif s in {"FAILED", "ERROR", "CANCELLED"}:
-                normalized_error = _mark_job_failed(job_id, st)
-                app.logger.error("fal.ai job %s failed with status %s: %s", req_id, s or "?", normalized_error)
-                _clear_pending_fal_job(req_id, job_id=job_id)
-
-        except Exception:
-            continue
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)

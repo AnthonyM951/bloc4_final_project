@@ -56,7 +56,7 @@ def _deserialize_params(raw: Any) -> dict[str, Any]:
     return {}
 
 
-def _update_job(job_id: int, payload: dict[str, Any]) -> None:
+def _update_job(job_id: str | int, payload: dict[str, Any]) -> None:
     """Met à jour un job en ignorant silencieusement les erreurs réseau."""
 
     if supabase is None:
@@ -68,7 +68,7 @@ def _update_job(job_id: int, payload: dict[str, Any]) -> None:
 
 
 @celery.task(name="process_video_job")
-def process_video_job(job_id: int) -> None:
+def process_video_job(job_id: str | int) -> None:
     """Tâche Celery qui appelle fal.ai puis met à jour Supabase via REST."""
 
     if supabase is None:
@@ -154,7 +154,7 @@ def process_video_job(job_id: int) -> None:
             file_id = None
 
     video_payload: dict[str, Any] = {
-        "job_id": job_id,
+        "job_id": str(job_id),
         "user_id": user_id,
         "title": prompt or "fal.ai video",
         "duration_seconds": 5.0,

@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 sys.path.insert(0, os.path.dirname(__file__))
 
 import app as app_module
-from app import app, _sync_fal_jobs  # type: ignore
+from app import app  # type: ignore
 from _supabase_dummy import DummySupabase
 from fal_webhook import FalWebhookVerificationError
 
@@ -100,7 +100,7 @@ def test_fal_webhook_verification(monkeypatch):
         "jobs",
         [
             {
-                "id": 1,
+                "id": "job-1",
                 "user_id": 42,
                 "external_job_id": "req-1",
             }
@@ -151,7 +151,7 @@ def test_fal_webhook_verification(monkeypatch):
     video_inserts = [
         rec for rec in dummy_supabase.records if rec.op == "insert" and rec.table == "videos"
     ]
-    assert video_inserts and video_inserts[0].payload["job_id"] == 1
+    assert video_inserts and video_inserts[0].payload["job_id"] == "job-1"
 
     param_updates = [
         rec
@@ -206,32 +206,43 @@ def test_fal_webhook_rejects_invalid_signature(monkeypatch):
     assert "invalid webhook" in data["error"]
 
 
-def test_scheduler_sync_success(monkeypatch):
+def test_fal_webhook_marks_running_status(monkeypatch):
+    client = app.test_client()
     dummy_supabase = DummySupabase()
     dummy_supabase.queue_select(
         "jobs",
         [
             {
-                "id": 1,
-                "external_job_id": "req_123",
-                "params": {"model_id": "model"},
+                "id": "job-1",
                 "user_id": 42,
+                "external_job_id": "req-1",
+                "status": "queued",
+                "params": {"model_id": "fal-ai/infinitalk/single-text"},
             }
         ],
     )
     monkeypatch.setattr(app_module, "supabase", dummy_supabase)
-    monkeypatch.setattr(app_module, "get_status", lambda *a, **k: {"status": "SUCCESS"})
-    monkeypatch.setattr(app_module, "get_result", lambda *a, **k: {"video": {"url": "http://v"}})
+    monkeypatch.setattr(app_module, "verify_fal_webhook", lambda *a, **k: None)
+    monkeypatch.setattr(app_module, "VERIFY_FAL_WEBHOOKS", True)
 
-    _sync_fal_jobs()
-    video_inserts = [rec for rec in dummy_supabase.records if rec.op == "insert" and rec.table == "videos"]
-    assert video_inserts and video_inserts[0].payload["job_id"] == 1
-    job_updates = [rec for rec in dummy_supabase.records if rec.op == "update" and rec.table == "jobs"]
-    assert any(rec.payload.get("status") == "succeeded" for rec in job_updates)
-    params_updates = [rec for rec in job_updates if "params" in rec.payload]
-    assert params_updates
-    stored_result = params_updates[0].payload["params"]["fal_result"]
-    assert stored_result["video"]["url"] == "http://v"
+    resp = client.post(
+        "/webhooks/fal",
+        json={"request_id": "req-1", "status": "IN_PROGRESS"},
+        headers={
+            "X-Fal-Webhook-Request-Id": "req-1",
+            "X-Fal-Webhook-User-Id": "user-1",
+            "X-Fal-Webhook-Timestamp": str(int(time.time())),
+            "X-Fal-Webhook-Signature": "00",
+        },
+    )
+
+    assert resp.status_code == 200
+    job_updates = [
+        rec
+        for rec in dummy_supabase.records
+        if rec.op == "update" and rec.table == "jobs"
+    ]
+    assert any(rec.payload.get("status") == "running" for rec in job_updates)
 
 
 def test_admin_guard():

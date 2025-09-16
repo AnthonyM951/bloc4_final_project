@@ -35,7 +35,7 @@ def test_process_video_job_inserts_file(monkeypatch):
         "jobs",
         [
             {
-                "id": 1,
+                "id": "job-1",
                 "user_id": 7,
                 "prompt": "hello",
                 "params": {"image_url": "http://example.com/img.png"},
@@ -58,7 +58,7 @@ def test_process_video_job_inserts_file(monkeypatch):
     monkeypatch.setattr(worker_module.fal_client, "submit", fake_submit)
     monkeypatch.setattr(worker_module.fal_client, "result", fake_result)
 
-    worker_module.process_video_job(1)
+    worker_module.process_video_job("job-1")
 
     file_inserts = [rec for rec in dummy_supabase.records if rec.op == "insert" and rec.table == "files"]
     assert file_inserts

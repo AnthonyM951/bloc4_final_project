@@ -80,8 +80,11 @@ class _DummyInsert:
         record = dict(self.payload)
         if self.table in self.supabase.next_ids and "id" not in record:
             next_id = self.supabase.next_ids[self.table]
-            record["id"] = next_id
             self.supabase.next_ids[self.table] = next_id + 1
+            if self.table in {"jobs", "videos"}:
+                record["id"] = f"{self.table}-{next_id}"
+            else:
+                record["id"] = next_id
         self.supabase.records.append(_Record("insert", self.table, record))
         return type("Resp", (), {"data": [record]})()
 

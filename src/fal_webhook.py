@@ -13,6 +13,7 @@ import requests
 try:  # pragma: no cover - optional dependency
     from nacl.exceptions import BadSignatureError
     from nacl.signing import VerifyKey
+    from nacl.encoding import HexEncoder
     _HAS_NACL = True
 except ImportError:  # pragma: no cover - executed in CI without PyNaCl
     BadSignatureError = Exception  # type: ignore[assignment]
@@ -42,14 +43,16 @@ JWKS_URL = os.getenv(
 
 _MAX_CACHE_SECONDS = 24 * 60 * 60
 try:
-    _configured_cache = int(os.getenv("FAL_JWKS_CACHE_SECONDS", "3600"))
+    _configured_cache = int(
+        os.getenv("FAL_JWKS_CACHE_SECONDS", str(_MAX_CACHE_SECONDS))
+    )
 except ValueError:  # pragma: no cover - invalid env configuration
-    _configured_cache = 3600
+    _configured_cache = _MAX_CACHE_SECONDS
 
 JWKS_CACHE_SECONDS = min(max(_configured_cache, 60), _MAX_CACHE_SECONDS)
 
 _jwks_cache: list[dict[str, object]] | None = None
-_jwks_cache_expiry: float = 0.0
+_jwks_cache_time: float = 0.0
 
 
 class FalWebhookVerificationError(RuntimeError):
@@ -62,14 +65,14 @@ def _decode_base64url(data: str) -> bytes:
 
 
 def fetch_jwks(force_refresh: bool = False) -> list[dict[str, object]]:
-    """Fetch the JSON Web Key Set used to verify webhook signatures."""
+    """Fetch and cache the JSON Web Key Set for webhook verification."""
 
-    global _jwks_cache, _jwks_cache_expiry
-    now = time.time()
+    global _jwks_cache, _jwks_cache_time
+    current_time = time.time()
     if (
         force_refresh
         or _jwks_cache is None
-        or now >= _jwks_cache_expiry
+        or (current_time - _jwks_cache_time) > JWKS_CACHE_SECONDS
     ):
         response = requests.get(JWKS_URL, timeout=10)
         response.raise_for_status()
@@ -78,7 +81,7 @@ def fetch_jwks(force_refresh: bool = False) -> list[dict[str, object]]:
         if not isinstance(keys, list):
             keys = []
         _jwks_cache = keys  # type: ignore[assignment]
-        _jwks_cache_expiry = now + JWKS_CACHE_SECONDS
+        _jwks_cache_time = current_time
     return _jwks_cache or []
 
 
@@ -120,7 +123,7 @@ def verify_fal_webhook(
         raise FalWebhookVerificationError("timestamp outside tolerance")
 
     # Construire le message
-    digest = hashlib.sha256(body).hexdigest()
+    digest = hashlib.sha256(body or b"").hexdigest()
     message = "\n".join([request_id, user_id, timestamp_raw, digest]).encode("utf-8")
 
     # Décoder la signature
@@ -135,19 +138,16 @@ def verify_fal_webhook(
     except Exception as exc:
         raise FalWebhookVerificationError("unable to fetch JWKS") from exc
 
-    verified = False
     for key_info in keys:
         key_data = key_info.get("x")
         if not isinstance(key_data, str):
             continue
         try:
             public_key = _decode_base64url(key_data)
-            verify_key = VerifyKey(public_key)
+            verify_key = VerifyKey(public_key.hex(), encoder=HexEncoder)
             verify_key.verify(message, signature)
-            verified = True
-            break
+            return
         except (BadSignatureError, ValueError, TypeError):
             continue
 
-    if not verified:
-        raise FalWebhookVerificationError("signature verification failed")
+    raise FalWebhookVerificationError("signature verification failed")
