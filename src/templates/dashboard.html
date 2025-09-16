@@ -35,6 +35,7 @@
   </form>
   <section class="p-4 rounded-lg border border-slate-700 bg-slate-900/40 space-y-2">
     <h2 class="text-sm font-semibold text-slate-200">Wikipedia scraping debug</h2>
+    <div id="scrape-status" class="text-xs text-slate-400 space-y-1"></div>
     <div id="scrape-debug" class="text-sm text-slate-300">
       Submit a prompt to trigger the Wikipedia scraping pipeline and the summary will be displayed here.
     </div>
@@ -56,8 +57,17 @@
   </table>
 </div>
 <script>
+
 const USER_ID = {{ user_id | tojson }};
 const debugOutput = document.getElementById('scrape-debug');
+const statusOutput = document.getElementById('scrape-status');
+const STATUS_STEPS = [
+  { id: 'queued', label: 'Queued' },
+  { id: 'summarizing', label: 'Summarizing' },
+  { id: 'generating', label: 'Generating' }
+];
+const statusElements = new Map();
+let pollSequence = 0;
 
 function updateDebugMessage(message, tone = 'info') {
   if (!debugOutput) return;
@@ -72,6 +82,92 @@ function updateDebugMessage(message, tone = 'info') {
     p.className = 'text-slate-300';
   }
   debugOutput.appendChild(p);
+}
+
+function initStatusUI() {
+  if (!statusOutput) return;
+  statusElements.clear();
+  statusOutput.innerHTML = '';
+  STATUS_STEPS.forEach(({ id, label }) => {
+    const row = document.createElement('div');
+    row.className = 'flex items-center gap-2';
+    const badge = document.createElement('span');
+    badge.className = 'inline-flex w-2.5 h-2.5 rounded-full bg-slate-700';
+    const textEl = document.createElement('span');
+    textEl.className = 'text-xs text-slate-400';
+    textEl.textContent = `${label}: Pending`;
+    row.appendChild(badge);
+    row.appendChild(textEl);
+    statusOutput.appendChild(row);
+    statusElements.set(id, { badge, text: textEl, label });
+  });
+}
+
+function setStatus(stepId, state = 'pending', customMessage) {
+  if (!statusOutput) return;
+  if (!statusElements.size) {
+    initStatusUI();
+  }
+  const entry = statusElements.get(stepId);
+  if (!entry) return;
+  const { badge, text, label } = entry;
+  let badgeColor = 'bg-slate-700';
+  let textColor = 'text-slate-400';
+  let message = customMessage;
+  switch (state) {
+    case 'active':
+      badgeColor = 'bg-amber-400';
+      textColor = 'text-amber-200';
+      message = message || 'In progress';
+      break;
+    case 'done':
+      badgeColor = 'bg-emerald-500';
+      textColor = 'text-emerald-300';
+      message = message || 'Completed';
+      break;
+    case 'error':
+      badgeColor = 'bg-red-500';
+      textColor = 'text-red-300';
+      message = message || 'Error';
+      break;
+    default:
+      badgeColor = 'bg-slate-700';
+      textColor = 'text-slate-400';
+      message = message || 'Pending';
+  }
+  badge.className = `inline-flex w-2.5 h-2.5 rounded-full ${badgeColor}`;
+  text.className = `text-xs ${textColor}`;
+  text.textContent = `${label}: ${message}`;
+}
+
+function resetStatuses() {
+  if (!statusOutput) return;
+  initStatusUI();
+}
+
+function updateGenerationStatus(message, tone = 'info') {
+  if (!debugOutput) return;
+  let note = document.getElementById('generation-status');
+  if (!note) {
+    note = document.createElement('p');
+    note.id = 'generation-status';
+    note.className = 'text-xs text-slate-400 mt-3';
+    debugOutput.appendChild(note);
+  }
+  let className = 'text-xs text-slate-400 mt-3';
+  if (tone === 'error') {
+    className = 'text-xs text-red-300 mt-3';
+  } else if (tone === 'success') {
+    className = 'text-xs text-emerald-300 mt-3';
+  } else if (tone === 'active') {
+    className = 'text-xs text-amber-200 mt-3';
+  }
+  note.className = className;
+  note.textContent = message;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function renderScrapeResults(data, jobId) {
@@ -133,7 +229,7 @@ function normalizeError(err) {
 }
 
 async function loadJobs() {
-  const res = await fetch(`/list_jobs/${USER_ID}`);
+  const res = await fetch(`/list_jobs/${USER_ID}`, { cache: 'no-store' });
   const jobs = await res.json();
   const body = document.getElementById('jobs-body');
   body.innerHTML = '';
@@ -141,7 +237,7 @@ async function loadJobs() {
     const tr = document.createElement('tr');
     let videoLinks = '';
     if (job.video_url) {
-      videoLinks = `<a href="${job.video_url}" target="_blank" class="text-teal-400">View</a>` +
+      videoLinks = `<a href="${job.video_url}" target="_blank" class="text-teal-400">View</a>`+
                    ` <a href="${job.video_url}" download class="text-teal-400 ml-2">Download</a>`;
     }
     tr.innerHTML = `<td class="px-2 py-1">${job.id}</td>`+
@@ -153,10 +249,106 @@ async function loadJobs() {
   });
 }
 
+async function pollJobUntilComplete(jobId, options = {}) {
+  const { interval = 5000, maxAttempts = 15 } = options;
+  const sequence = ++pollSequence;
+  let lastStatus = null;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    if (sequence !== pollSequence) {
+      return;
+    }
+    if (attempt > 0) {
+      await sleep(interval);
+    }
+    if (sequence !== pollSequence) {
+      return;
+    }
+
+    let res;
+    try {
+      res = await fetch(`/list_jobs/${USER_ID}`, {
+        cache: 'no-store',
+        headers: { Accept: 'application/json' }
+      });
+    } catch (err) {
+      console.error('Failed to poll job status', err);
+      continue;
+    }
+
+    if (!res.ok) {
+      console.warn('Job status request failed', res.status, res.statusText);
+      continue;
+    }
+
+    let jobs;
+    try {
+      jobs = await res.json();
+    } catch (err) {
+      console.error('Failed to parse jobs payload', err);
+      continue;
+    }
+
+    if (!Array.isArray(jobs)) {
+      console.warn('Unexpected jobs payload', jobs);
+      continue;
+    }
+
+    const job = jobs.find(j => j.id === jobId);
+    if (!job) {
+      continue;
+    }
+
+    if (job.status !== lastStatus) {
+      lastStatus = job.status;
+      loadJobs();
+    }
+
+    const normalizedStatus = typeof job.status === 'string' ? job.status.toLowerCase() : '';
+
+    if (normalizedStatus === 'succeeded') {
+      if (sequence !== pollSequence) return;
+      setStatus('generating', 'done', 'Video ready');
+      updateGenerationStatus(`Video generated successfully for job #${jobId}.`, 'success');
+      loadJobs();
+      return;
+    }
+
+    if (normalizedStatus === 'failed') {
+      if (sequence !== pollSequence) return;
+      setStatus('generating', 'error', 'Generation failed');
+      updateGenerationStatus(`Video generation failed for job #${jobId}.`, 'error');
+      loadJobs();
+      return;
+    }
+
+    if (normalizedStatus === 'running') {
+      setStatus('generating', 'active', 'Video generation in progress');
+      updateGenerationStatus('Video generation in progress...', 'active');
+    } else if (normalizedStatus === 'queued') {
+      setStatus('generating', 'active', 'Queued for generation');
+      updateGenerationStatus('Job queued for generation...', 'active');
+    } else {
+      setStatus('generating', 'active', job.status || 'In progress');
+      updateGenerationStatus(`Current job status: ${job.status}`, 'active');
+    }
+  }
+
+  if (sequence !== pollSequence) {
+    return;
+  }
+  setStatus('generating', 'error', 'Timed out');
+  updateGenerationStatus('Timed out waiting for video generation to finish.', 'error');
+}
+
 document.getElementById('job-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const prompt = document.getElementById('prompt').value;
   const imageUrl = document.getElementById('image-url').value;
+  resetStatuses();
+  setStatus('queued', 'active', 'Submitting job');
+  updateDebugMessage('Submitting job...');
+  let jobData;
   try {
     const jobRes = await fetch('/submit_job', {
       method: 'POST',
@@ -164,9 +356,9 @@ document.getElementById('job-form').addEventListener('submit', async (e) => {
       body: JSON.stringify({ user_id: USER_ID, prompt, params: { image_url: imageUrl } })
     });
 
-    let jobData;
     if (jobRes.ok) {
       jobData = await jobRes.json();
+      setStatus('queued', 'done', `Job #${jobData.id} queued`);
     } else {
       let detail = `${jobRes.status} ${jobRes.statusText}`;
       try {
@@ -175,6 +367,7 @@ document.getElementById('job-form').addEventListener('submit', async (e) => {
           detail = payload.error;
         }
       } catch (_) {}
+      setStatus('queued', 'error', 'Job submission failed');
       throw new Error(detail);
     }
 
@@ -183,34 +376,48 @@ document.getElementById('job-form').addEventListener('submit', async (e) => {
     }
 
     loadJobs();
-    updateDebugMessage(`Job #${jobData.id} submitted. Running Wikipedia scraping debug...`);
-
-    try {
-      const summaryRes = await fetch('/wiki_summary', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ query: prompt })
-      });
-
-      if (!summaryRes.ok) {
-        let detail = `${summaryRes.status} ${summaryRes.statusText}`;
-        try {
-          const payload = await summaryRes.json();
-          if (payload && payload.error) {
-            detail = payload.error;
-          }
-        } catch (_) {}
-        throw new Error(detail);
-      }
-
-      const data = await summaryRes.json();
-      renderScrapeResults(data, jobData.id);
-    } catch (err) {
-      updateDebugMessage(`Scraping debug failed: ${normalizeError(err)}`, 'error');
-    }
   } catch (err) {
     updateDebugMessage(`Job submission failed: ${normalizeError(err)}`, 'error');
+    return;
   }
+
+  setStatus('summarizing', 'active', 'Fetching Wikipedia data');
+  updateDebugMessage(`Job #${jobData.id} submitted. Running Wikipedia scraping debug...`);
+
+  try {
+    const summaryRes = await fetch('/wiki_summary', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ query: prompt })
+    });
+
+    if (!summaryRes.ok) {
+      let detail = `${summaryRes.status} ${summaryRes.statusText}`;
+      try {
+        const payload = await summaryRes.json();
+        if (payload && payload.error) {
+          detail = payload.error;
+        }
+      } catch (_) {}
+      setStatus('summarizing', 'error', 'Summary failed');
+      setStatus('generating', 'pending', 'Waiting to start');
+      throw new Error(detail);
+    }
+
+    const data = await summaryRes.json();
+    setStatus('summarizing', 'done', 'Summary generated');
+    renderScrapeResults(data, jobData.id);
+  } catch (err) {
+    updateDebugMessage(`Scraping debug failed: ${normalizeError(err)}`, 'error');
+    return;
+  }
+
+  setStatus('generating', 'active', 'Waiting for generation update');
+  updateGenerationStatus('Awaiting video generation status...', 'active');
+  pollJobUntilComplete(jobData.id).catch((err) => {
+    setStatus('generating', 'error', 'Status check failed');
+    updateGenerationStatus(`Failed to check job status: ${normalizeError(err)}`, 'error');
+  });
 });
 
 const refreshButton = document.getElementById('refresh-jobs');
@@ -218,6 +425,10 @@ if (refreshButton) {
   refreshButton.addEventListener('click', loadJobs);
 }
 
-document.addEventListener('DOMContentLoaded', loadJobs);
+document.addEventListener('DOMContentLoaded', () => {
+  initStatusUI();
+  loadJobs();
+});
+
 </script>
 {% endblock %}
