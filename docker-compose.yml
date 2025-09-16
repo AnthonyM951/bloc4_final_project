@@ -10,7 +10,11 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      ollama:
+        condition: service_started
     restart: unless-stopped
+    environment:
+      - OLLAMA_URL=http://ollama:11434
 
   worker:
     build: .
@@ -24,7 +28,12 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      ollama:
+        condition: service_started
     restart: unless-stopped
+    user: "1000:1000"
+    environment:
+      - OLLAMA_URL=http://ollama:11434
 
   redis:
     image: redis:7-alpine
@@ -37,3 +46,15 @@ services:
       timeout: 3s
       retries: 20
     restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: videoapp_ollama
+    ports:
+      - "11434:11434" # Expose to host as well
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+
+volumes:
+  ollama_data:
