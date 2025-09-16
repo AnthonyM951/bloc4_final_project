@@ -4,12 +4,15 @@ from typing import Any
 
 import requests
 
-FAL_BASE = "https://api.fal.ai"
+FAL_BASE = os.getenv("FAL_API_BASE", "https://api.fal.ai")
+FAL_QUEUE_BASE = os.getenv("FAL_QUEUE_BASE", "https://queue.fal.run")
 FAL_KEY = os.getenv("FAL_KEY")
 
 
 def _headers(json: bool = True):
-    headers = {"Authorization": f"Bearer {FAL_KEY}"}
+    headers = {}
+    if FAL_KEY:
+        headers["Authorization"] = f"Key {FAL_KEY}"
     if json:
         headers["Content-Type"] = "application/json"
     return headers
@@ -35,11 +38,15 @@ def submit_text2video(
     webhook_url: str | None = None,
 ) -> str:
     payload: dict[str, object] = {"input": _normalize_input(input_data)}
+    params = None
     if webhook_url:
         payload["webhookUrl"] = webhook_url
+        params = {"fal_webhook": webhook_url}
+    endpoint = f"{FAL_QUEUE_BASE.rstrip('/')}/{model_id.lstrip('/')}"
     r = requests.post(
-        f"{FAL_BASE}/models/{model_id}/api/queue/submit",
+        endpoint,
         headers=_headers(),
+        params=params,
         json=payload,
         timeout=30,
     )

@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 sys.path.insert(0, os.path.dirname(__file__))
@@ -7,6 +8,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 import app as app_module
 from app import app, _sync_fal_jobs  # type: ignore
 from _supabase_dummy import DummySupabase
+from fal_webhook import FalWebhookVerificationError
 
 
 def test_submit_job_fal(monkeypatch):
@@ -41,6 +43,7 @@ def test_submit_job_fal(monkeypatch):
     assert resp.status_code == 202
     data = resp.get_json()
     assert data["external_job_id"] == "req_123"
+    assert data["webhook_url"].endswith("/webhooks/fal")
     inserts = [rec for rec in dummy_supabase.records if rec.op == "insert" and rec.table == "jobs"]
     assert inserts and inserts[0].payload["prompt"] == body["prompt"]
     params = inserts[0].payload["params"]
@@ -50,7 +53,8 @@ def test_submit_job_fal(monkeypatch):
     assert any(rec.payload.get("external_job_id") == "req_123" for rec in updates)
 
     assert captured["model_id"] == "fal-ai/infinitalk/single-text"
-    assert captured["webhook_url"] is None
+    assert captured["webhook_url"].endswith("/webhooks/fal")
+    assert captured["webhook_url"] == data["webhook_url"]
     assert captured["payload"] == {
         "prompt": body["prompt"],
         "text_input": body["text_input"],
@@ -61,6 +65,85 @@ def test_submit_job_fal(monkeypatch):
         "seed": 42,
         "acceleration": "regular",
     }
+
+
+def test_fal_webhook_verification(monkeypatch):
+    client = app.test_client()
+    dummy_supabase = DummySupabase()
+    dummy_supabase.queue_select(
+        "jobs",
+        [
+            {
+                "id": 1,
+                "user_id": 42,
+                "external_job_id": "req-1",
+            }
+        ],
+    )
+    monkeypatch.setattr(app_module, "supabase", dummy_supabase)
+
+    called: dict[str, object] = {}
+
+    def fake_verify(headers, body):
+        called["headers"] = dict(headers)
+        called["body"] = body
+
+    monkeypatch.setattr(app_module, "verify_fal_webhook", fake_verify)
+    monkeypatch.setattr(app_module, "VERIFY_FAL_WEBHOOKS", True)
+
+    payload = {
+        "request_id": "req-1",
+        "status": "OK",
+        "payload": {"video": {"url": "http://cdn/video.mp4"}},
+    }
+
+    resp = client.post(
+        "/webhooks/fal",
+        json=payload,
+        headers={
+            "X-Fal-Webhook-Request-Id": "req-1",
+            "X-Fal-Webhook-User-Id": "user-1",
+            "X-Fal-Webhook-Timestamp": str(int(time.time())),
+            "X-Fal-Webhook-Signature": "00",
+        },
+    )
+
+    assert resp.status_code == 200
+    assert called["headers"]["X-Fal-Webhook-Request-Id"] == "req-1"
+    assert isinstance(called["body"], (bytes, bytearray))
+    assert b"req-1" in called["body"]
+
+    video_inserts = [
+        rec for rec in dummy_supabase.records if rec.op == "insert" and rec.table == "videos"
+    ]
+    assert video_inserts and video_inserts[0].payload["job_id"] == 1
+
+
+def test_fal_webhook_rejects_invalid_signature(monkeypatch):
+    client = app.test_client()
+    dummy_supabase = DummySupabase()
+    monkeypatch.setattr(app_module, "supabase", dummy_supabase)
+    monkeypatch.setattr(app_module, "VERIFY_FAL_WEBHOOKS", True)
+
+    def fake_verify(headers, body):  # pragma: no cover - trivial stub
+        raise FalWebhookVerificationError("bad signature")
+
+    monkeypatch.setattr(app_module, "verify_fal_webhook", fake_verify)
+
+    resp = client.post(
+        "/webhooks/fal",
+        json={"request_id": "req-1", "status": "OK"},
+        headers={
+            "X-Fal-Webhook-Request-Id": "req-1",
+            "X-Fal-Webhook-User-Id": "user-1",
+            "X-Fal-Webhook-Timestamp": str(int(time.time())),
+            "X-Fal-Webhook-Signature": "ff",
+        },
+    )
+
+    assert resp.status_code == 400
+    data = resp.get_json()
+    assert "invalid webhook" in data["error"]
 
 
 def test_scheduler_sync_success(monkeypatch):
