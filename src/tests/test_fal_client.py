@@ -162,6 +162,31 @@ def test_get_status_falls_back_to_post_on_405(monkeypatch):
     assert status == {"status": "RUNNING"}
 
 
+def test_get_result_falls_back_to_post_on_405(monkeypatch):
+    captures: dict[str, object] = {}
+
+    def fake_get(url, headers, timeout=None):
+        captures["get_url"] = url
+        captures["get_headers"] = headers
+        captures["get_timeout"] = timeout
+        return DummyResponse({}, status_code=405, url=url)
+
+    def fake_post(url, headers, json=None, timeout=None):
+        captures["post_url"] = url
+        captures["post_headers"] = headers
+        captures["post_json"] = json
+        captures["post_timeout"] = timeout
+        return DummyResponse({"status": "SUCCESS"})
+
+    monkeypatch.setattr(fal_client.requests, "get", fake_get)
+    monkeypatch.setattr(fal_client.requests, "post", fake_post)
+
+    payload = fal_client.get_result("fal-ai/model", "req-200")
+
+    assert captures["post_json"] == {}
+    assert payload == {"status": "SUCCESS"}
+
+
 @pytest.mark.anyio("asyncio")
 async def test_status_async_delegates_to_get_status(monkeypatch):
     calls: dict[str, object] = {}

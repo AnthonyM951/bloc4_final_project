@@ -21,8 +21,17 @@
         <dt class="font-medium text-slate-300">Request ID</dt>
         <dd id="request-id" class="text-right break-all"></dd>
       </div>
+      <div class="flex items-center justify-between gap-2">
+        <dt class="font-medium text-slate-300">Video</dt>
+        <dd id="request-video" class="text-right break-all text-teal-300"></dd>
+      </div>
     </dl>
+    <div id="request-logs-wrapper" class="hidden rounded-md border border-slate-800/80 bg-slate-950/50 p-2 space-y-1">
+      <h3 class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">fal.ai activity</h3>
+      <ol id="request-logs" class="space-y-1 text-[11px] leading-snug text-slate-300"></ol>
+    </div>
   </section>
+  <pre id="submission-response" class="bg-slate-900 p-4 rounded text-sm"></pre>
   <pre id="result" class="bg-slate-900 p-4 rounded text-sm"></pre>
   <pre id="wiki-result" class="bg-slate-900 p-4 rounded text-sm"></pre>
 </div>
@@ -31,7 +40,16 @@ const USER_ID = {{ user_id | tojson }};
 const requestState = document.getElementById('request-state');
 const requestMeta = document.getElementById('request-meta');
 const requestIdEl = document.getElementById('request-id');
-let pollTimeout = null;
+const requestVideoEl = document.getElementById('request-video');
+const requestLogsWrapper = document.getElementById('request-logs-wrapper');
+const requestLogsList = document.getElementById('request-logs');
+const submissionOutput = document.getElementById('submission-response');
+const falResultOutput = document.getElementById('result');
+
+let jobPollTimeout = null;
+let falStatusTimeout = null;
+let activeJobId = null;
+let lastLogSignature = '';
 
 function setState(message, tone = 'info') {
   if (!requestState) return;
@@ -45,27 +63,151 @@ function setState(message, tone = 'info') {
   requestState.textContent = message;
 }
 
+function renderJson(target, payload) {
+  if (!target) return;
+  if (payload === null || payload === undefined) {
+    target.textContent = '';
+    return;
+  }
+  try {
+    target.textContent = JSON.stringify(payload, null, 2);
+  } catch (err) {
+    target.textContent = String(payload);
+  }
+}
+
+function updateVideoLink(url) {
+  if (!requestVideoEl) return;
+  requestVideoEl.innerHTML = '';
+  if (!url) {
+    return;
+  }
+  const link = document.createElement('a');
+  link.href = url;
+  link.target = '_blank';
+  link.rel = 'noopener noreferrer';
+  link.className = 'text-teal-300 hover:text-teal-200 underline';
+  link.textContent = 'Open video';
+  requestVideoEl.appendChild(link);
+}
+
 function updateRequestMeta(data) {
   if (!requestMeta) return;
   if (!data) {
     requestMeta.classList.add('hidden');
-    requestIdEl.textContent = '';
+    if (requestIdEl) requestIdEl.textContent = '';
+    updateVideoLink('');
     return;
   }
   requestMeta.classList.remove('hidden');
-  requestIdEl.textContent = data.external_job_id || '—';
+  if (requestIdEl) {
+    const identifier = data.external_job_id || data.request_id || '—';
+    requestIdEl.textContent = identifier;
+  }
+  updateVideoLink(data.video_url || '');
+}
+
+function normalizeLogEntry(entry) {
+  if (entry === null || entry === undefined) return null;
+  if (typeof entry === 'string') {
+    const trimmed = entry.trim();
+    return trimmed || null;
+  }
+  if (typeof entry === 'number' || typeof entry === 'boolean') {
+    return String(entry);
+  }
+  if (typeof entry === 'object') {
+    for (const key of ['message', 'msg', 'text', 'detail', 'status']) {
+      if (typeof entry[key] === 'string' && entry[key].trim()) {
+        return entry[key].trim();
+      }
+    }
+    try {
+      return JSON.stringify(entry);
+    } catch (err) {
+      return String(entry);
+    }
+  }
+  return String(entry);
+}
+
+function updateRequestLogs(entries) {
+  if (!requestLogsWrapper || !requestLogsList) return;
+  const values = Array.isArray(entries)
+    ? entries
+    : entries !== null && entries !== undefined
+      ? [entries]
+      : [];
+  const normalized = values
+    .map((entry) => normalizeLogEntry(entry))
+    .filter((entry) => typeof entry === 'string' && entry);
+  const signature = normalized.join('||');
+  if (!normalized.length) {
+    requestLogsWrapper.classList.add('hidden');
+    requestLogsList.innerHTML = '';
+    lastLogSignature = '';
+    return;
+  }
+  if (signature === lastLogSignature) {
+    return;
+  }
+  lastLogSignature = signature;
+  requestLogsWrapper.classList.remove('hidden');
+  requestLogsList.innerHTML = '';
+  normalized.forEach((text, index) => {
+    const item = document.createElement('li');
+    item.className = 'rounded border border-slate-800/70 bg-slate-950/60 px-2 py-1';
+    item.textContent = `${index + 1}. ${text}`;
+    requestLogsList.appendChild(item);
+  });
+}
+
+function stopJobPolling() {
+  if (jobPollTimeout) {
+    clearTimeout(jobPollTimeout);
+    jobPollTimeout = null;
+  }
+}
+
+function stopFalStatusPolling() {
+  if (falStatusTimeout) {
+    clearTimeout(falStatusTimeout);
+    falStatusTimeout = null;
+  }
+}
+
+function extractVideoUrl(payload) {
+  if (!payload) return null;
+  if (typeof payload === 'string') {
+    return payload;
+  }
+  if (typeof payload.video_url === 'string' && payload.video_url) {
+    return payload.video_url;
+  }
+  if (payload.video && typeof payload.video === 'object') {
+    const nested = extractVideoUrl(payload.video);
+    if (nested) return nested;
+  }
+  if (Array.isArray(payload.videos)) {
+    for (const item of payload.videos) {
+      const nested = extractVideoUrl(item);
+      if (nested) return nested;
+    }
+  }
+  if (typeof payload.url === 'string' && payload.url) {
+    return payload.url;
+  }
+  return null;
 }
 
 async function pollJobStatus(jobId) {
-  if (pollTimeout) {
-    clearTimeout(pollTimeout);
-    pollTimeout = null;
-  }
+  stopJobPolling();
   if (!jobId) return;
 
   const poll = async () => {
+    if (jobId !== activeJobId) return;
     try {
-      const resp = await fetch(`/list_jobs/${USER_ID}`);
+      const resp = await fetch(`/list_jobs/${USER_ID}`, { cache: 'no-store' });
       if (!resp.ok) {
         throw new Error(`HTTP ${resp.status}`);
       }
@@ -73,23 +215,105 @@ async function pollJobStatus(jobId) {
       const job = Array.isArray(jobs) ? jobs.find((item) => item.id === jobId) : null;
       if (!job) {
         setState('Waiting for job to appear in Supabase…', 'active');
-      } else if (job.status === 'succeeded') {
-        setState('✅ Video generated successfully! Check your library for the file.', 'success');
-        return;
-      } else if (job.status === 'failed') {
-        const reason = job.error ? ` Reason: ${job.error}` : '';
-        setState(`The request failed.${reason}`, 'error');
-        return;
       } else {
+        updateRequestMeta(job);
+        if (job.status === 'succeeded') {
+          const url = extractVideoUrl(job);
+          if (url) {
+            updateVideoLink(url);
+            setState('✅ Video generated successfully! Your video is ready.', 'success');
+          } else {
+            setState('✅ Video generated successfully! Check your library for the file.', 'success');
+          }
+          stopFalStatusPolling();
+          return;
+        }
+        if (job.status === 'failed') {
+          const reason = job.error ? ` Reason: ${job.error}` : '';
+          setState(`The request failed.${reason}`, 'error');
+          stopFalStatusPolling();
+          return;
+        }
         const statusLabel = job.status === 'running' ? 'Processing' : 'Queued';
         setState(`${statusLabel}… processing at fal.ai.`, 'active');
       }
     } catch (err) {
       setState(`Unable to fetch job status: ${err.message}`, 'error');
+      stopFalStatusPolling();
       return;
     }
-    pollTimeout = setTimeout(poll, 4000);
+    jobPollTimeout = setTimeout(poll, 4000);
   };
+
+  poll();
+}
+
+async function pollFalStatus(jobId) {
+  stopFalStatusPolling();
+  if (!jobId) return;
+
+  const poll = async () => {
+    if (jobId !== activeJobId) return;
+    try {
+      const resp = await fetch(`/fal_status/${jobId}`, { cache: 'no-store' });
+      let payload = null;
+      try {
+        payload = await resp.json();
+      } catch (err) {
+        payload = null;
+      }
+
+      if (resp.status === 404) {
+        updateRequestLogs([]);
+      } else if (!resp.ok) {
+        const message = payload && payload.error ? payload.error : `HTTP ${resp.status}`;
+        updateRequestLogs([`fal.ai status error: ${message}`]);
+      } else if (payload) {
+        if (Array.isArray(payload.logs)) {
+          updateRequestLogs(payload.logs);
+        } else {
+          updateRequestLogs([]);
+        }
+
+        if (payload.status && !payload.result) {
+          renderJson(falResultOutput, payload.status);
+        }
+
+        if (payload.result) {
+          renderJson(falResultOutput, payload.result);
+          const videoUrl = extractVideoUrl(payload.video || payload.result);
+          if (videoUrl) {
+            updateVideoLink(videoUrl);
+          }
+        } else if (payload.video) {
+          const videoUrl = extractVideoUrl(payload.video);
+          if (videoUrl) {
+            updateVideoLink(videoUrl);
+          }
+        } else if (payload.video_url) {
+          updateVideoLink(payload.video_url);
+        }
+
+        if (typeof payload.status_upper === 'string') {
+          const normalized = payload.status_upper.toUpperCase();
+          if (['FAILED', 'ERROR'].includes(normalized)) {
+            setState('The fal.ai request failed.', 'error');
+            stopFalStatusPolling();
+            return;
+          }
+          if (['SUCCESS', 'SUCCEEDED', 'COMPLETED', 'OK'].includes(normalized)) {
+            stopFalStatusPolling();
+            return;
+          }
+        }
+      }
+    } catch (err) {
+      updateRequestLogs([`fal.ai status error: ${err.message}`]);
+    }
+    if (jobId !== activeJobId) return;
+    falStatusTimeout = setTimeout(poll, 5000);
+  };
+
   poll();
 }
 
@@ -97,7 +321,18 @@ document.getElementById('gen-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const prompt = document.getElementById('prompt').value;
   const imageUrl = document.getElementById('image-url').value;
+
+  stopJobPolling();
+  stopFalStatusPolling();
+  activeJobId = null;
+  lastLogSignature = '';
+  updateRequestLogs([]);
+  updateRequestMeta(null);
+  renderJson(submissionOutput, null);
+  renderJson(falResultOutput, null);
+
   setState('Submitting job to fal.ai…', 'active');
+
   const res = await fetch('/submit_job_fal', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -108,6 +343,7 @@ document.getElementById('gen-form').addEventListener('submit', async (e) => {
       image_url: imageUrl
     })
   });
+
   let data;
   try {
     data = await res.json();
@@ -115,16 +351,21 @@ document.getElementById('gen-form').addEventListener('submit', async (e) => {
     setState('Failed to parse response from the server.', 'error');
     return;
   }
-  document.getElementById('result').textContent = JSON.stringify(data, null, 2);
+
+  renderJson(submissionOutput, data);
+
   if (!res.ok) {
     const errorMsg = data && data.error ? data.error : 'The fal.ai submission failed.';
     setState(errorMsg, 'error');
     updateRequestMeta(null);
     return;
   }
+
+  activeJobId = data.job_id;
   updateRequestMeta(data);
   setState('Job queued at fal.ai. Waiting for status updates…', 'active');
-  pollJobStatus(data.job_id);
+  pollJobStatus(activeJobId);
+  pollFalStatus(activeJobId);
 });
 
 document.getElementById('wiki-btn').addEventListener('click', async () => {

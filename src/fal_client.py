@@ -93,9 +93,21 @@ def get_status(
 
 def get_result(model_id: str, request_id: str) -> dict:
     endpoint = _queue_request_url(model_id, "requests", request_id)
-    r = requests.get(endpoint, headers=_headers(False), timeout=30)
-    r.raise_for_status()
-    return r.json()
+    try:
+        response = requests.get(endpoint, headers=_headers(False), timeout=30)
+        response.raise_for_status()
+    except requests_exceptions.HTTPError as exc:
+        response = getattr(exc, "response", None)
+        if response is None or response.status_code != 405:
+            raise
+        response = requests.post(
+            endpoint,
+            headers=_headers(),
+            json={},
+            timeout=30,
+        )
+        response.raise_for_status()
+    return response.json()
 
 
 def _is_sequence(value: object) -> bool:
@@ -268,3 +280,9 @@ def submit(model_id: str, arguments: dict):  # pragma: no cover - simple wrapper
 def result(model_id: str, request_id: str) -> dict:  # pragma: no cover - simple wrapper
     payload = get_result(model_id, request_id)
     return _normalize_result_payload(payload)
+
+
+def status(model_id: str, request_id: str, *, with_logs: bool = False) -> dict:
+    """Light wrapper matching the public fal_client API."""
+
+    return get_status(model_id, request_id, with_logs=with_logs)
