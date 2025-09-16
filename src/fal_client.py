@@ -1,4 +1,7 @@
 import os
+from collections.abc import Mapping
+from typing import Any
+
 import requests
 
 FAL_BASE = "https://api.fal.ai"
@@ -12,8 +15,26 @@ def _headers(json: bool = True):
     return headers
 
 
-def submit_text2video(model_id: str, prompt: str, webhook_url: str | None = None) -> str:
-    payload: dict[str, object] = {"input": {"prompt": prompt}}
+def _normalize_input(input_data: str | Mapping[str, Any]) -> dict[str, Any]:
+    """Return a JSON-serialisable payload for fal.ai submissions."""
+
+    if isinstance(input_data, Mapping):
+        normalized: dict[str, Any] = {
+            key: value
+            for key, value in input_data.items()
+            if value is not None
+        }
+    else:
+        normalized = {"prompt": input_data}
+    return normalized
+
+
+def submit_text2video(
+    model_id: str,
+    input_data: str | Mapping[str, Any],
+    webhook_url: str | None = None,
+) -> str:
+    payload: dict[str, object] = {"input": _normalize_input(input_data)}
     if webhook_url:
         payload["webhookUrl"] = webhook_url
     r = requests.post(
@@ -51,9 +72,11 @@ def get_result(model_id: str, request_id: str) -> dict:
 
 # Backwards compatibility helpers used by worker.py tests
 def submit(model_id: str, arguments: dict):  # pragma: no cover - simple wrapper
-    prompt = arguments.get("prompt", "")
     webhook_url = arguments.get("webhook_url")
-    req_id = submit_text2video(model_id, prompt, webhook_url)
+    input_args = arguments.get("input")
+    if input_args is None:
+        input_args = {k: v for k, v in arguments.items() if k != "webhook_url"}
+    req_id = submit_text2video(model_id, input_args, webhook_url)
     return type("Handle", (), {"request_id": req_id})()
 
 

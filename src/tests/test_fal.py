@@ -14,16 +14,53 @@ def test_submit_job_fal(monkeypatch):
 
     dummy_supabase = DummySupabase()
     monkeypatch.setattr(app_module, "supabase", dummy_supabase)
-    monkeypatch.setattr(app_module, "submit_text2video", lambda *a, **k: "req_123")
+    captured: dict[str, object] = {}
 
-    resp = client.post("/submit_job_fal", json={"user_id": 1, "prompt": "hello"})
+    def fake_submit(model_id, payload, webhook_url=None):
+        captured["model_id"] = model_id
+        captured["payload"] = payload
+        captured["webhook_url"] = webhook_url
+        return "req_123"
+
+    monkeypatch.setattr(app_module, "submit_text2video", fake_submit)
+
+    body = {
+        "user_id": 1,
+        "model_id": "fal-ai/infinitalk/single-text",
+        "prompt": "An elderly man with a white beard and headphones records audio with a microphone. He appears engaged and expressive, suggesting a podcast or voiceover.",
+        "text_input": "Spend more time with people who make you feel alive, and less with things that drain your soul.",
+        "image_url": "https://v3.fal.media/files/panda/HuM21CXMf0q7OO2zbvwhV_c4533aada79a495b90e50e32dc9b83a8.png",
+        "voice": "Brian",
+        "num_frames": 145,
+        "resolution": "480p",
+        "seed": 42,
+        "acceleration": "regular",
+    }
+
+    resp = client.post("/submit_job_fal", json=body)
     assert resp.status_code == 202
     data = resp.get_json()
     assert data["external_job_id"] == "req_123"
     inserts = [rec for rec in dummy_supabase.records if rec.op == "insert" and rec.table == "jobs"]
-    assert inserts and inserts[0].payload["prompt"] == "hello"
+    assert inserts and inserts[0].payload["prompt"] == body["prompt"]
+    params = inserts[0].payload["params"]
+    assert params["model_id"] == "fal-ai/infinitalk/single-text"
+    assert params["fal_input"] == captured["payload"]
     updates = [rec for rec in dummy_supabase.records if rec.op == "update" and rec.table == "jobs"]
     assert any(rec.payload.get("external_job_id") == "req_123" for rec in updates)
+
+    assert captured["model_id"] == "fal-ai/infinitalk/single-text"
+    assert captured["webhook_url"] is None
+    assert captured["payload"] == {
+        "prompt": body["prompt"],
+        "text_input": body["text_input"],
+        "image_url": body["image_url"],
+        "voice": "Brian",
+        "num_frames": 145,
+        "resolution": "480p",
+        "seed": 42,
+        "acceleration": "regular",
+    }
 
 
 def test_scheduler_sync_success(monkeypatch):

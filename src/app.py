@@ -40,7 +40,7 @@ app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET", "dev-secret-change-me")
 app.config["JSONIFY_PRETTYPRINT_REGULAR"] = False
 
-MODEL_DEFAULT = os.getenv("FAL_MODEL", "fal-ai/veo3")
+MODEL_DEFAULT = os.getenv("MODEL_DEFAULT") or os.getenv("FAL_MODEL", "fal-ai/veo3")
 
 scheduler = BackgroundScheduler(daemon=True)
 
@@ -186,8 +186,11 @@ def scrape_and_clean(url: str) -> tuple[str, str | None]:
 def summarize_text(text: str) -> str:
     """Résume un texte en utilisant Ollama ou un fallback simple."""
     prompt = (
-        "Summarize the following text in a concise paragraph:\n"
-        f"{text}\nSummary:"
+        "You are a seasoned course creator preparing a short script for a talking-head "
+        "educational video. Using the following reference material, craft a motivating "
+        "narration that sounds like it will be spoken directly to learners. Keep the tone "
+        "encouraging, mention the central idea once, and avoid bullet points.\n"
+        f"{text}\nCourse video script:"
     )
     summary = ollama_generate(prompt)
     if summary:
@@ -666,11 +669,57 @@ def submit_job_fal():
     prompt = data.get("prompt", "")
     model_id = data.get("model_id", MODEL_DEFAULT)
 
+    fal_input: dict[str, object] = {}
+    raw_fal_input = data.get("fal_input")
+    if isinstance(raw_fal_input, dict):
+        fal_input.update({k: v for k, v in raw_fal_input.items() if v is not None})
+
+    override_keys = (
+        "prompt",
+        "text_input",
+        "image_url",
+        "voice",
+        "num_frames",
+        "resolution",
+        "seed",
+        "acceleration",
+    )
+    for key in override_keys:
+        if key in data and data[key] is not None:
+            fal_input[key] = data[key]
+
+    if prompt and "prompt" not in fal_input:
+        fal_input["prompt"] = prompt
+
+    script_value = fal_input.get("text_input")
+    if isinstance(script_value, str):
+        stripped = script_value.strip()
+        if stripped:
+            fal_input["text_input"] = stripped
+        elif prompt:
+            fal_input["text_input"] = prompt
+    elif script_value is not None:
+        fal_input["text_input"] = str(script_value)
+    elif prompt:
+        fal_input["text_input"] = prompt
+
+    defaults = {
+        "voice": "Brian",
+        "num_frames": 145,
+        "resolution": "480p",
+        "seed": 42,
+        "acceleration": "regular",
+    }
+    for key, value in defaults.items():
+        fal_input.setdefault(key, value)
+
+    fal_input = {k: v for k, v in fal_input.items() if v is not None}
+
     try:
         res = supabase.table("jobs").insert({
             "user_id": user_id,
             "prompt": prompt,
-            "params": {"model_id": model_id},
+            "params": {"model_id": model_id, "fal_input": fal_input},
             "status": "queued",
             "provider": "fal"
         }).execute()
@@ -679,7 +728,7 @@ def submit_job_fal():
         return jsonify({"error": str(e)}), 400
 
     try:
-        external_id = submit_text2video(model_id, prompt, webhook_url=None)
+        external_id = submit_text2video(model_id, fal_input, webhook_url=None)
         supabase.table("jobs").update({"external_job_id": external_id}).eq("id", job_id).execute()
     except Exception as e:
         return jsonify({"error": f"Fal submission failed: {e}"}), 502
