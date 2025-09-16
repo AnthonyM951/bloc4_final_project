@@ -1,9 +1,12 @@
 import json
 import os
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import wraps
-from time import time
+from threading import Lock
+from time import monotonic, time
+from typing import Any, Mapping, Sequence
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import (
     Flask,
@@ -51,10 +54,364 @@ VERIFY_FAL_WEBHOOKS = os.getenv("FAL_VERIFY_WEBHOOKS", "1").lower() not in {
 
 scheduler = BackgroundScheduler(daemon=True)
 
+def _read_int_env(name: str, default: int, *, minimum: int | None = None) -> int:
+    """Return ``name`` as integer with fallback to ``default`` and ``minimum``."""
+
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    if minimum is not None and value < minimum:
+        return minimum
+    return value
+
+
+FAL_WEBHOOK_TIMEOUT_SECONDS = max(_read_int_env("FAL_WEBHOOK_TIMEOUT_SECONDS", 600), 0)
+FAL_QUEUE_POLL_INTERVAL_SECONDS = max(_read_int_env("FAL_QUEUE_POLL_INTERVAL", 30), 5)
+FAL_QUEUE_RETRY_INTERVAL_SECONDS = max(
+    _read_int_env("FAL_QUEUE_RETRY_INTERVAL", 60),
+    FAL_QUEUE_POLL_INTERVAL_SECONDS,
+    5,
+)
+
+
+@dataclass
+class _PendingFalJob:
+    job_id: int
+    model_id: str
+    deadline: float
+    retries: int = 0
+
+
+_pending_fal_jobs: dict[str, _PendingFalJob] = {}
+_pending_jobs_lock = Lock()
+_scheduler_started = False
+_QUEUE_WATCHDOG_JOB_ID = "fal_queue_watchdog"
+
 # Regex pour validation email et mot de passe
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 PASSWORD_RE = re.compile(r"^(?=.*[A-Z])(?=.*\d).{8,}$")
 
+
+def _extract_video_url(payload: object) -> str | None:
+    """Try to locate a video URL inside ``payload`` returned by fal.ai."""
+
+    if isinstance(payload, Mapping):
+        for key in ("response", "payload", "data"):
+            nested = payload.get(key)
+            url = _extract_video_url(nested)
+            if url:
+                return url
+        video_section = payload.get("video")
+        url = _extract_video_url(video_section)
+        if url:
+            return url
+        for key in ("video_url", "signed_url", "url"):
+            value = payload.get(key)
+            if isinstance(value, str) and value:
+                return value
+        videos = payload.get("videos")
+        if isinstance(videos, Sequence) and not isinstance(videos, (str, bytes, bytearray)):
+            for item in videos:
+                url = _extract_video_url(item)
+                if url:
+                    return url
+    elif isinstance(payload, Sequence) and not isinstance(payload, (str, bytes, bytearray)):
+        for item in payload:
+            url = _extract_video_url(item)
+            if url:
+                return url
+    elif isinstance(payload, str) and payload:
+        return payload
+    return None
+
+
+def _normalize_error_message(*payloads: object) -> str | None:
+    """Extract a human readable error message from fal.ai payloads."""
+
+    for payload in payloads:
+        if isinstance(payload, Mapping):
+            for key in ("error", "detail", "message"):
+                value = payload.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+                if (
+                    isinstance(value, Sequence)
+                    and not isinstance(value, (str, bytes, bytearray))
+                    and value
+                ):
+                    first = value[0]
+                    if isinstance(first, str) and first.strip():
+                        return first.strip()
+                    if first is not None:
+                        return str(first)
+        elif isinstance(payload, Sequence) and not isinstance(payload, (str, bytes, bytearray)) and payload:
+            first = payload[0]
+            if isinstance(first, str) and first.strip():
+                return first.strip()
+            if first is not None:
+                return str(first)
+        elif isinstance(payload, str) and payload.strip():
+            return payload.strip()
+    return None
+
+
+def _stringify_error_detail(value: object, default: str = "fal error") -> str:
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return default
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except TypeError:
+        return str(value)
+
+
+def _update_pending_job(
+    request_id: str, *, deadline: float | None = None, increment_retry: bool = False
+) -> None:
+    with _pending_jobs_lock:
+        entry = _pending_fal_jobs.get(request_id)
+        if entry is None:
+            return
+        if deadline is not None:
+            entry.deadline = deadline
+        if increment_retry:
+            entry.retries += 1
+
+
+def _clear_pending_fal_job(
+    request_id: str | None = None, *, job_id: int | None = None
+) -> None:
+    with _pending_jobs_lock:
+        removed = False
+        if request_id:
+            removed = _pending_fal_jobs.pop(request_id, None) is not None
+        if not removed and job_id is not None:
+            for key, entry in list(_pending_fal_jobs.items()):
+                if entry.job_id == job_id:
+                    _pending_fal_jobs.pop(key, None)
+
+
+def _finalize_fal_job_success(job_id: int, user_id: Any, video_url: str | None) -> None:
+    if supabase is None:
+        return
+    if video_url:
+        supabase.table("videos").insert({
+            "job_id": job_id,
+            "user_id": user_id,
+            "title": "Video (fal.ai)",
+            "source_url": video_url,
+        }).execute()
+    supabase.table("jobs").update({
+        "status": "succeeded",
+        "finished_at": current_timestamp(),
+    }).eq("id", job_id).execute()
+
+
+def _mark_job_failed(job_id: int, *payloads: object) -> str:
+    message = _normalize_error_message(*payloads) or "fal error"
+    normalized = _stringify_error_detail(message)
+    if supabase is not None:
+        supabase.table("jobs").update({
+            "status": "failed",
+            "error": normalized,
+        }).eq("id", job_id).execute()
+    return normalized
+
+
+def _process_pending_fal_jobs() -> None:
+    """Fallback watchdog that uses the fal queue when webhooks are missing."""
+
+    if supabase is None:
+        return
+
+    with _pending_jobs_lock:
+        items = list(_pending_fal_jobs.items())
+    if not items:
+        return
+
+    now = monotonic()
+    for request_id, pending in items:
+        if now < pending.deadline:
+            continue
+
+        try:
+            job_res = (
+                supabase.table("jobs")
+                .select("id, user_id, status, params")
+                .eq("id", pending.job_id)
+                .limit(1)
+                .execute()
+            )
+        except Exception as exc:  # pragma: no cover - network failure logged
+            app.logger.debug(
+                "Queue watchdog could not load job %s: %s", pending.job_id, exc
+            )
+            _update_pending_job(
+                request_id,
+                deadline=now + FAL_QUEUE_RETRY_INTERVAL_SECONDS,
+                increment_retry=True,
+            )
+            continue
+
+        rows = getattr(job_res, "data", None) or []
+        if not rows:
+            _clear_pending_fal_job(request_id)
+            continue
+
+        job = rows[0]
+        status_value = (job.get("status") or "").lower()
+        if status_value in {"succeeded", "failed"}:
+            _clear_pending_fal_job(request_id)
+            continue
+
+        params = job.get("params") if isinstance(job.get("params"), Mapping) else {}
+        model_id = pending.model_id or params.get("model_id") or MODEL_DEFAULT
+        if not model_id:
+            app.logger.debug("Queue watchdog missing model for job %s", pending.job_id)
+            _clear_pending_fal_job(request_id)
+            continue
+
+        try:
+            status_payload = get_status(model_id, request_id)
+        except Exception as exc:  # pragma: no cover - network failure logged
+            app.logger.debug(
+                "Queue watchdog status fetch failed for %s: %s", request_id, exc
+            )
+            _update_pending_job(
+                request_id,
+                deadline=now + FAL_QUEUE_RETRY_INTERVAL_SECONDS,
+                increment_retry=True,
+            )
+            continue
+
+        status_upper = (status_payload.get("status") or "").upper()
+
+        if status_upper in {"COMPLETED", "SUCCESS", "OK"}:
+            try:
+                result_payload = get_result(model_id, request_id)
+            except Exception as exc:  # pragma: no cover - network failure logged
+                app.logger.debug(
+                    "Queue watchdog result fetch failed for %s: %s", request_id, exc
+                )
+                _update_pending_job(
+                    request_id,
+                    deadline=now + FAL_QUEUE_RETRY_INTERVAL_SECONDS,
+                    increment_retry=True,
+                )
+                continue
+
+            payload_candidate: object = result_payload
+            if isinstance(result_payload, Mapping):
+                nested_payload = result_payload.get("payload") or result_payload.get("response")
+                if isinstance(nested_payload, Mapping):
+                    payload_candidate = nested_payload
+
+            video_url = _extract_video_url(payload_candidate)
+            try:
+                _finalize_fal_job_success(job["id"], job.get("user_id"), video_url)
+            except Exception as exc:  # pragma: no cover - Supabase error logged
+                app.logger.exception(
+                    "Queue watchdog failed to finalize job %s: %s", request_id, exc
+                )
+            _clear_pending_fal_job(request_id, job_id=job["id"])
+
+        elif status_upper in {"FAILED", "ERROR", "CANCELLED"}:
+            try:
+                message = _mark_job_failed(job["id"], status_payload)
+            except Exception as exc:  # pragma: no cover - Supabase error logged
+                app.logger.exception(
+                    "Queue watchdog failed to mark job %s as failed: %s", request_id, exc
+                )
+            else:
+                app.logger.error(
+                    "fal.ai job %s failed via queue fallback: %s", request_id, message
+                )
+            _clear_pending_fal_job(request_id, job_id=job["id"])
+
+        elif status_upper in {"IN_PROGRESS", "PROCESSING"}:
+            try:
+                supabase.table("jobs").update({
+                    "status": "running",
+                    "started_at": current_timestamp(),
+                }).eq("id", job["id"]).execute()
+            except Exception:  # pragma: no cover - logging not critical
+                pass
+            _update_pending_job(
+                request_id,
+                deadline=now + FAL_QUEUE_POLL_INTERVAL_SECONDS,
+            )
+
+        elif status_upper in {"IN_QUEUE", "QUEUED"}:
+            _update_pending_job(
+                request_id,
+                deadline=now + FAL_QUEUE_POLL_INTERVAL_SECONDS,
+            )
+
+        else:
+            _update_pending_job(
+                request_id,
+                deadline=now + FAL_QUEUE_POLL_INTERVAL_SECONDS,
+                increment_retry=True,
+            )
+
+
+def _ensure_scheduler_started() -> None:
+    """Start the APScheduler watchdog for pending fal.ai jobs."""
+
+    global _scheduler_started
+    if _scheduler_started or FAL_WEBHOOK_TIMEOUT_SECONDS <= 0:
+        return
+
+    try:
+        if scheduler.get_job(_QUEUE_WATCHDOG_JOB_ID) is None:
+            scheduler.add_job(
+                _process_pending_fal_jobs,
+                "interval",
+                seconds=FAL_QUEUE_POLL_INTERVAL_SECONDS,
+                id=_QUEUE_WATCHDOG_JOB_ID,
+                max_instances=1,
+                replace_existing=True,
+            )
+        if not scheduler.running:
+            scheduler.start()
+        _scheduler_started = True
+    except Exception as exc:  # pragma: no cover - scheduler failure logged
+        app.logger.warning("Unable to start fal.ai queue watchdog: %s", exc)
+
+
+def _register_pending_fal_job(
+    request_id: str | None, job_id: int | None, model_id: str | None
+) -> None:
+    if (
+        not request_id
+        or job_id is None
+        or FAL_WEBHOOK_TIMEOUT_SECONDS <= 0
+    ):
+        return
+
+    resolved_model = model_id or MODEL_DEFAULT
+    if not resolved_model:
+        return
+
+    try:
+        job_identifier = int(job_id)
+    except (TypeError, ValueError):
+        return
+
+    deadline = monotonic() + FAL_WEBHOOK_TIMEOUT_SECONDS
+    with _pending_jobs_lock:
+        _pending_fal_jobs[request_id] = _PendingFalJob(
+            job_id=job_identifier,
+            model_id=resolved_model,
+            deadline=deadline,
+        )
+
+    _ensure_scheduler_started()
 
 def sanitize_text(text: str) -> str:
     """Nettoyer le texte : autoriser seulement alphanumérique, tiret, underscore"""
@@ -645,26 +1002,14 @@ def fal_webhook():
     gateway_request_id = payload.get("gateway_request_id")
 
     result_payload = payload.get("payload")
-    if not isinstance(result_payload, dict):
-        result_payload = payload
-
-    video_url: str | None = None
-    video_info = result_payload.get("video")
-    if isinstance(video_info, dict):
-        video_url = video_info.get("url") or video_info.get("signed_url")
-    elif isinstance(video_info, str):
-        video_url = video_info
-    if not video_url:
-        alt_video = result_payload.get("video_url")
-        if isinstance(alt_video, str):
-            video_url = alt_video
+    if not isinstance(result_payload, Mapping):
+        response_payload = payload.get("response")
+        if isinstance(response_payload, Mapping):
+            result_payload = response_payload
         else:
-            videos_list = result_payload.get("videos")
-            if isinstance(videos_list, list):
-                for item in videos_list:
-                    if isinstance(item, dict) and isinstance(item.get("url"), str):
-                        video_url = item["url"]
-                        break
+            result_payload = payload
+
+    video_url = _extract_video_url(result_payload)
 
     if not request_id:
         return jsonify({"error": "missing request_id"}), 400
@@ -683,7 +1028,7 @@ def fal_webhook():
 
         status_upper = (status or "").upper()
 
-        if status_upper in {"SUCCESS", "OK"}:
+        if status_upper in {"SUCCESS", "OK", "COMPLETED"}:
             if video_url:
                 supabase.table("videos").insert({
                     "job_id": job_id,
@@ -695,22 +1040,14 @@ def fal_webhook():
                 "status": "succeeded",
                 "finished_at": current_timestamp(),
             }).eq("id", job_id).execute()
+            if request_id:
+                _clear_pending_fal_job(request_id, job_id=job_id)
+            if gateway_request_id:
+                _clear_pending_fal_job(gateway_request_id, job_id=job_id)
 
-        elif status_upper in {"FAILED", "ERROR"}:
-            error_detail = payload.get("error")
-            if not error_detail and isinstance(result_payload, dict):
-                detail = result_payload.get("detail") or result_payload.get("error")
-                if isinstance(detail, str):
-                    error_detail = detail
-                elif isinstance(detail, list) and detail:
-                    first_detail = detail[0]
-                    error_detail = first_detail if isinstance(first_detail, str) else str(first_detail)
-            normalized_error = error_detail or "fal error"
-            if not isinstance(normalized_error, str):
-                try:
-                    normalized_error = json.dumps(normalized_error, ensure_ascii=False)
-                except TypeError:
-                    normalized_error = str(normalized_error)
+        elif status_upper in {"FAILED", "ERROR", "CANCELLED"}:
+            error_detail = _normalize_error_message(payload, result_payload)
+            normalized_error = _stringify_error_detail(error_detail)
             app.logger.error(
                 "fal.ai job %s failed with status %s: %s",
                 request_id,
@@ -721,6 +1058,10 @@ def fal_webhook():
                 "status": "failed",
                 "error": normalized_error
             }).eq("id", job_id).execute()
+            if request_id:
+                _clear_pending_fal_job(request_id, job_id=job_id)
+            if gateway_request_id:
+                _clear_pending_fal_job(gateway_request_id, job_id=job_id)
 
         else:
             supabase.table("jobs").update({"status": "running"}).eq("id", job_id).execute()
@@ -821,6 +1162,7 @@ def submit_job_fal():
         )
         external_id = submit_text2video(model_id, fal_input, webhook_url=webhook_url)
         supabase.table("jobs").update({"external_job_id": external_id}).eq("id", job_id).execute()
+        _register_pending_fal_job(external_id, job_id, model_id)
     except Exception as e:
         app.logger.exception(
             "Fal submission failed for job %s with model %s", job_id, model_id
@@ -919,60 +1261,46 @@ def _sync_fal_jobs():
     for job in jobs:
         job_id = job["id"]
         req_id = job.get("external_job_id")
+        if not req_id:
+            continue
+
         user_id = job.get("user_id")
-        params = job.get("params") or {}
-        model_id = params.get("model_id", MODEL_DEFAULT)
+        params_raw = job.get("params")
+        params = params_raw if isinstance(params_raw, Mapping) else {}
+        model_id = params.get("model_id") or MODEL_DEFAULT
+        if not model_id:
+            continue
 
         try:
             st = get_status(model_id, req_id)
             s = (st.get("status") or "").upper()
 
-            if s in ("QUEUED", "IN_PROGRESS", "PROCESSING"):
+            if s in {"QUEUED", "IN_QUEUE", "IN_PROGRESS", "PROCESSING"}:
                 supabase.table("jobs").update({
                     "status": "running",
                     "started_at": current_timestamp()
                 }).eq("id", job_id).execute()
 
-            elif s in ("SUCCESS", "OK"):
+            elif s in {"SUCCESS", "OK", "COMPLETED"}:
                 res = get_result(model_id, req_id)
-                result_payload = res.get("payload") if isinstance(res.get("payload"), dict) else res
-                video_url = None
-                if isinstance(result_payload, dict):
-                    video_section = result_payload.get("video")
-                    if isinstance(video_section, dict):
-                        video_url = video_section.get("url") or video_section.get("signed_url")
-                    elif isinstance(video_section, str):
-                        video_url = video_section
-                    if not video_url:
-                        alt_url = result_payload.get("video_url")
-                        if isinstance(alt_url, str):
-                            video_url = alt_url
-                        else:
-                            videos_list = result_payload.get("videos")
-                            if isinstance(videos_list, list):
-                                for item in videos_list:
-                                    if isinstance(item, dict) and isinstance(item.get("url"), str):
-                                        video_url = item["url"]
-                                        break
-                if not video_url and isinstance(res.get("video"), dict):
-                    video_url = res["video"].get("url")
-                if video_url:
-                    supabase.table("videos").insert({
-                        "job_id": job_id,
-                        "user_id": user_id,
-                        "title": "Video (fal.ai)",
-                        "source_url": video_url
-                    }).execute()
-                supabase.table("jobs").update({
-                    "status": "succeeded",
-                    "finished_at": current_timestamp()
-                }).eq("id", job_id).execute()
+                payload_candidate: object = res
+                if isinstance(res, Mapping):
+                    nested_payload = res.get("payload") or res.get("response")
+                    if isinstance(nested_payload, Mapping):
+                        payload_candidate = nested_payload
+                video_url = _extract_video_url(payload_candidate)
+                _finalize_fal_job_success(job_id, user_id, video_url)
+                _clear_pending_fal_job(req_id, job_id=job_id)
 
-            elif s in ("FAILED", "ERROR", "CANCELLED"):
-                supabase.table("jobs").update({
-                    "status": "failed",
-                    "error": st.get("error") or "fal error"
-                }).eq("id", job_id).execute()
+            elif s in {"FAILED", "ERROR", "CANCELLED"}:
+                normalized_error = _mark_job_failed(job_id, st)
+                app.logger.error(
+                    "fal.ai job %s failed with status %s: %s",
+                    req_id,
+                    s or "?",
+                    normalized_error,
+                )
+                _clear_pending_fal_job(req_id, job_id=job_id)
 
         except Exception:
             continue
