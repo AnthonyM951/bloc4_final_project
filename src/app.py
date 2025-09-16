@@ -1506,7 +1506,7 @@ def submit_job_fal():
         "num_frames": 145,
         "resolution": "480p",
         "seed": 42,
-        "acceleration": "regular",
+        "acceleration": "high",
     }
     for key, value in defaults.items():
         fal_input.setdefault(key, value)
