@@ -34,6 +34,11 @@ def capture_post(monkeypatch):
     return captured
 
 
+@pytest.fixture()
+def anyio_backend():
+    return "asyncio"
+
+
 def test_submit_text2video_flattens_payload(capture_post):
     req_id = fal_client.submit_text2video(
         "fal-ai/infinitalk/single-text",
@@ -60,3 +65,39 @@ def test_submit_text2video_accepts_string_input(capture_post):
 
     payload = capture_post["json"]
     assert payload == {"prompt": "a smiling teacher"}
+
+
+@pytest.mark.anyio("asyncio")
+async def test_result_async_normalizes_video_payload(monkeypatch):
+    dummy_payload = {
+        "request_id": "req-42",
+        "status": "SUCCESS",
+        "response": {
+            "output": {
+                "video": {
+                    "file_name": "3bdf6ce8201244438438f716816d3fdc.mp4",
+                    "file_size": "353718",
+                },
+                "url": "https://v3.fal.media/files/zebra/wj1oyQvnCLZRr59m4mffW_3bdf6ce8201244438438f716816d3fdc.mp4",
+                "content_type": "application/octet-stream",
+            }
+        },
+        "seed": 42,
+    }
+
+    def fake_get(url, headers, timeout):
+        assert "fal-ai/model" in url
+        assert headers.get("Content-Type") is None
+        return DummyResponse(dummy_payload)
+
+    monkeypatch.setattr(fal_client.requests, "get", fake_get)
+
+    result = await fal_client.result_async("fal-ai/model", "req-42")
+
+    assert result["video"] == {
+        "url": "https://v3.fal.media/files/zebra/wj1oyQvnCLZRr59m4mffW_3bdf6ce8201244438438f716816d3fdc.mp4",
+        "content_type": "application/octet-stream",
+        "file_name": "3bdf6ce8201244438438f716816d3fdc.mp4",
+        "file_size": 353718,
+    }
+    assert result["seed"] == 42
