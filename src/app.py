@@ -190,14 +190,22 @@ def scrape_and_clean(url: str) -> tuple[str, str | None]:
         return "", f"Failed to parse HTML: {exc}"
 
 
-def summarize_text(text: str) -> str:
-    """Résume un texte en utilisant Ollama ou un fallback simple."""
+def summarize_text(text: str, topic_hint: str | None = None) -> str:
+    """Génère un script vidéo pédagogique à partir d'un texte et d'un sujet donné."""
+    learner_request = topic_hint.strip() if isinstance(topic_hint, str) else ""
     prompt = (
-        "You are a seasoned course creator preparing a short script for a talking-head "
-        "educational video. Using the following reference material, craft a motivating "
-        "narration that sounds like it will be spoken directly to learners. Keep the tone "
-        "encouraging, mention the central idea once, and avoid bullet points.\n"
-        f"{text}\nCourse video script:"
+        "You are an expert course designer preparing the narration for a short explainer "
+        "video lesson. First, identify the main topic the learner wants to explore based "
+        "on their request below. Then, craft a motivating mini-course script that "
+        "contains an inviting introduction, two or three concise teaching moments, and a "
+        "closing encouragement. Speak directly to the learner, keep paragraphs short, "
+        "avoid bullet points, and reuse the reference notes only when they support the "
+        "explanation. Whenever possible, reply in the same language as the learner's "
+        "request.\n"
+        f"Learner request: {learner_request or 'Not provided'}\n"
+        "Reference notes:\n"
+        f"{text}\n"
+        "Explainer video script:"
     )
     summary = ollama_generate(prompt)
     if summary:
@@ -570,7 +578,7 @@ def wiki_summary():
                 )
 
     combined_text = " ".join(texts)
-    summary = summarize_text(combined_text) if combined_text else ""
+    summary = summarize_text(combined_text, query) if combined_text else ""
 
     payload: dict[str, object] = {
         "keywords": keywords,

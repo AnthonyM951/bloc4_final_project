@@ -173,7 +173,7 @@ def test_wiki_summary(monkeypatch):
     def fake_scrape(url):
         return "Python is a programming language.", None  # pragma: no cover
 
-    def fake_summary(text):
+    def fake_summary(text, topic_hint=None):
         return "summary"  # pragma: no cover
 
     monkeypatch.setattr(app_module, "extract_keywords", fake_extract)
