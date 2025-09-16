@@ -4,7 +4,8 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import wraps
-from time import time
+from threading import Thread
+from time import sleep, time
 from typing import Any, Mapping, Sequence
 from flask import (
     Flask,
@@ -28,7 +29,7 @@ from supabase import create_client
 import requests
 from bs4 import BeautifulSoup
 
-from fal_client import submit_text2video
+from fal_client import get_result, get_status, submit_text2video
 from fal_webhook import FalWebhookVerificationError, verify_fal_webhook
 
 try:  # pragma: no cover
@@ -229,6 +230,218 @@ def _merge_job_video_urls(jobs: list[dict[str, Any]]) -> None:
 
 
 
+def _load_job_row(job_id: str) -> dict[str, Any] | None:
+    """Fetch a job row from Supabase using its identifier."""
+
+    if supabase is None:
+        return None
+
+    try:
+        res = (
+            supabase.table("jobs")
+            .select("id, user_id, params, prompt, status")
+            .eq("id", job_id)
+            .limit(1)
+            .execute()
+        )
+    except Exception as exc:
+        app.logger.error("Unable to load job %s: %s", job_id, exc)
+        return None
+
+    rows = getattr(res, "data", None) or []
+    if not rows:
+        return None
+
+    row = rows[0]
+    return dict(row) if isinstance(row, Mapping) else row
+
+
+def _coerce_status_value(value: object) -> str | None:
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped or None
+    if isinstance(value, Mapping):
+        for key in ("status", "state", "phase", "value", "label"):
+            nested = _coerce_status_value(value.get(key))
+            if nested:
+                return nested
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        for item in value:
+            nested = _coerce_status_value(item)
+            if nested:
+                return nested
+    elif value is not None:
+        text = str(value).strip()
+        if text:
+            return text
+    return None
+
+
+def _extract_status_label(payload: object) -> str | None:
+    if isinstance(payload, Mapping):
+        for key in ("status", "state", "phase", "stage"):
+            nested = _coerce_status_value(payload.get(key))
+            if nested:
+                return nested
+        for key in ("payload", "response", "data", "result", "meta", "metadata"):
+            nested = _extract_status_label(payload.get(key))
+            if nested:
+                return nested
+    elif isinstance(payload, Sequence) and not isinstance(payload, (str, bytes, bytearray)):
+        for item in payload:
+            nested = _extract_status_label(item)
+            if nested:
+                return nested
+    return _coerce_status_value(payload)
+
+
+def _poll_fal_job(job_id: str, request_id: str, model_id: str) -> None:
+    """Poll fal.ai until a job is finished and persist the result."""
+
+    if supabase is None:
+        return
+
+    job_identifier = str(job_id)
+    request_identifier = str(request_id)
+    model_identifier = model_id or MODEL_DEFAULT or ""
+
+    job_row = _load_job_row(job_identifier)
+    if job_row is None:
+        app.logger.error(
+            "fal.ai polling aborted for job %s: job not found", job_identifier
+        )
+        _mark_job_failed(job_identifier, {"error": "job not found"})
+        return
+
+    app.logger.info(
+        "Starting fal.ai polling worker for job %s (request=%s model=%s)",
+        job_identifier,
+        request_identifier,
+        model_identifier,
+    )
+
+    try:
+        supabase.table("jobs").update({
+            "status": "running",
+            "started_at": current_timestamp(),
+        }).eq("id", job_identifier).execute()
+    except Exception as exc:
+        app.logger.debug(
+            "Unable to mark job %s as running before polling: %s",
+            job_identifier,
+            exc,
+        )
+
+    success_states = {"SUCCESS", "COMPLETED", "OK"}
+    failure_states = {"FAILED", "ERROR", "CANCELLED"}
+    running_states = {"PENDING", "QUEUED", "RUNNING", "IN_PROGRESS", "PROCESSING"}
+
+    last_status: str | None = None
+    consecutive_errors = 0
+
+    while True:
+        try:
+            status_payload = get_status(model_identifier, request_identifier)
+        except Exception as exc:
+            consecutive_errors += 1
+            app.logger.error(
+                "fal.ai status polling failed for job %s (attempt %s): %s",
+                job_identifier,
+                consecutive_errors,
+                exc,
+            )
+            if consecutive_errors >= 3:
+                _mark_job_failed(job_identifier, str(exc))
+                return
+            sleep(5)
+            continue
+
+        consecutive_errors = 0
+        status_label = _extract_status_label(status_payload)
+        status_upper = status_label.upper() if isinstance(status_label, str) else ""
+
+        if status_upper:
+            app.logger.info(
+                "fal.ai job %s (request=%s) status=%s",
+                job_identifier,
+                request_identifier,
+                status_upper,
+            )
+        else:
+            app.logger.info(
+                "fal.ai job %s (request=%s) status payload=%s",
+                job_identifier,
+                request_identifier,
+                status_payload,
+            )
+
+        if (
+            status_upper
+            and status_upper not in success_states
+            and status_upper not in failure_states
+            and status_upper != last_status
+        ):
+            _record_fal_webhook_event(
+                job_row,
+                status=status_label or status_upper,
+                request_id=request_identifier,
+                gateway_request_id=None,
+                raw_payload=status_payload if isinstance(status_payload, Mapping) else None,
+                result_payload=None,
+            )
+            last_status = status_upper
+
+        if status_upper in success_states:
+            try:
+                result_payload = get_result(model_identifier, request_identifier)
+            except Exception as exc:
+                app.logger.error(
+                    "Unable to retrieve fal.ai result for job %s: %s",
+                    job_identifier,
+                    exc,
+                )
+                _mark_job_failed(job_identifier, str(exc))
+                return
+
+            job_row = _load_job_row(job_identifier) or job_row
+
+            _record_fal_webhook_event(
+                job_row,
+                status=status_label or status_upper,
+                request_id=request_identifier,
+                gateway_request_id=None,
+                raw_payload=status_payload if isinstance(status_payload, Mapping) else None,
+                result_payload=result_payload,
+            )
+
+            _finalize_fal_job_success(job_row, result_payload)
+            return
+
+        if status_upper in failure_states:
+            job_row = _load_job_row(job_identifier) or job_row
+
+            _record_fal_webhook_event(
+                job_row,
+                status=status_label or status_upper,
+                request_id=request_identifier,
+                gateway_request_id=None,
+                raw_payload=status_payload if isinstance(status_payload, Mapping) else None,
+                result_payload=status_payload,
+            )
+
+            _mark_job_failed(job_identifier, status_payload)
+            return
+
+        if status_upper not in running_states and status_upper:
+            app.logger.debug(
+                "Job %s received unexpected fal.ai status %s",
+                job_identifier,
+                status_upper,
+            )
+
+        sleep(5)
+
+
 def _record_fal_webhook_event(
     job_row: Mapping[str, Any],
     *,
@@ -370,6 +583,7 @@ def _mark_job_failed(job_id: str, *payloads: object) -> str:
             supabase.table("jobs").update({
                 "status": "failed",
                 "error": normalized,
+                "finished_at": current_timestamp(),
             }).eq("id", str(job_id)).execute()
         except Exception as exc:
             app.logger.error("Unable to mark job %s as failed: %s", job_id, exc)
@@ -1315,27 +1529,22 @@ def submit_job_fal():
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
-    webhook_override = os.getenv("FAL_WEBHOOK_URL")
-    webhook_url = webhook_override
-    if not webhook_url:
-        try:
-            webhook_url = url_for("fal_webhook", _external=True)
-        except RuntimeError:
-            webhook_url = None
-
     try:
         try:
             serialized_input = json.dumps(fal_input, ensure_ascii=False)
         except TypeError:
             serialized_input = str(fal_input)
         app.logger.info(
-            "Submitting fal.ai job %s with model %s and payload %s (webhook=%s)",
+            "Submitting fal.ai job %s with model %s and payload %s",
             job_id,
             model_id,
             serialized_input,
-            webhook_url or "<none>",
         )
-        external_id = submit_text2video(model_id, fal_input, webhook_url=webhook_url)
+        external_id = submit_text2video(model_id, fal_input)
+        if external_id is not None and not isinstance(external_id, str):
+            external_id = str(external_id)
+        if not external_id:
+            raise RuntimeError("fal.ai request id missing")
         supabase.table("jobs").update({"external_job_id": external_id}).eq("id", job_id).execute()
     except Exception as e:
         app.logger.exception(
@@ -1349,8 +1558,17 @@ def submit_job_fal():
         "status": "queued",
         "course_material": course_payload,
     }
-    if webhook_url:
-        payload["webhook_url"] = webhook_url
+
+    try:
+        Thread(
+            target=_poll_fal_job,
+            args=(str(job_id), str(external_id), model_id),
+            daemon=True,
+        ).start()
+    except Exception as exc:
+        app.logger.error(
+            "Unable to launch fal.ai polling thread for job %s: %s", job_id, exc
+        )
 
     return jsonify(payload), 202
 
