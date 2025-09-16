@@ -31,14 +31,29 @@ def test_process_video_job_inserts_file(monkeypatch):
     submitted: dict[str, object] = {}
 
     dummy_supabase = DummySupabase()
+    fal_input_payload = {
+        "prompt": "A warm professor stands facing the viewer in a softly lit classroom, gesturing with open hands as they explain video about tyrannosaurus.",
+        "text_input": "Hello! Today we're exploring video about tyrannosaurus. First, we'll set the stage with the essential context. Then we'll unpack two key ideas that bring the topic to life before closing with a quick recap and encouragement to keep learning.",
+        "image_url": "https://img.freepik.com/free-photo/portrait-male-professor-teaching-school_23-2150911623.jpg",
+        "voice": "Brian",
+        "num_frames": 145,
+        "resolution": "480p",
+        "seed": 42,
+        "acceleration": "high",
+        "webhook_url": "https://example.com/webhooks/fal",
+    }
+
     dummy_supabase.queue_select(
         "jobs",
         [
             {
                 "id": "job-1",
                 "user_id": 7,
-                "prompt": "hello",
-                "params": {"image_url": "http://example.com/img.png"},
+                "prompt": fal_input_payload["prompt"],
+                "params": {
+                    "model_id": "fal-ai/infinitalk/single-text",
+                    "fal_input": fal_input_payload,
+                },
             }
         ],
     )
@@ -51,7 +66,10 @@ def test_process_video_job_inserts_file(monkeypatch):
         submitted["kwargs"] = kwargs
         return DummyHandle()
 
+    result_calls: list[tuple[object, ...]] = []
+
     def fake_result(*args, **kwargs):
+        result_calls.append(args)
         return {"video": {"url": "http://example.com/video.mp4"}}
 
     monkeypatch.setattr(worker_module, "supabase", dummy_supabase)
@@ -71,9 +89,6 @@ def test_process_video_job_inserts_file(monkeypatch):
     assert any(rec.payload.get("external_job_id") == "abc123" for rec in updates)
     assert any(rec.payload.get("status") == "succeeded" for rec in updates)
 
-    # Vérifie que fal_client.submit reçoit le prompt et l'image
-    assert submitted["kwargs"]["arguments"]["prompt"] == "hello"
-    assert (
-        submitted["kwargs"]["arguments"]["image_url"]
-        == "http://example.com/img.png"
-    )
+    assert submitted["args"] == ("fal-ai/infinitalk/single-text",)
+    assert submitted["kwargs"]["arguments"] == fal_input_payload
+    assert result_calls == [("fal-ai/infinitalk/single-text", "abc123")]

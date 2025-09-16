@@ -28,9 +28,7 @@ def _normalize_input(input_data: str | Mapping[str, Any]) -> dict[str, Any]:
 
     if isinstance(input_data, Mapping):
         normalized: dict[str, Any] = {
-            key: value
-            for key, value in input_data.items()
-            if value is not None and key != "webhook_url"
+            key: value for key, value in input_data.items() if value is not None
         }
     else:
         normalized = {"prompt": input_data}
@@ -41,7 +39,7 @@ def submit_text2video(
     model_id: str,
     input_data: str | Mapping[str, Any],
 ) -> str:
-    payload: dict[str, object] = {"input": _normalize_input(input_data)}
+    payload: dict[str, object] = _normalize_input(input_data)
     endpoint = f"{FAL_QUEUE_BASE.rstrip('/')}/{model_id.lstrip('/')}"
     r = requests.post(
         endpoint,
@@ -270,10 +268,10 @@ async def status_async(
 
 # Backwards compatibility helpers used by worker.py tests
 def submit(model_id: str, arguments: dict):  # pragma: no cover - simple wrapper
-    input_args = arguments.get("input")
-    if input_args is None:
-        input_args = {k: v for k, v in arguments.items() if k != "webhook_url"}
-    req_id = submit_text2video(model_id, input_args)
+    payload = arguments.get("input")
+    if payload is None:
+        payload = {k: v for k, v in arguments.items() if k != "input"}
+    req_id = submit_text2video(model_id, payload)
     return type("Handle", (), {"request_id": req_id})()
 
 
