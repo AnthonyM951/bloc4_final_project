@@ -399,7 +399,7 @@ def test_fal_status_endpoint_returns_logs_and_result(monkeypatch):
             {
                 "id": "job-200",
                 "external_job_id": "req-200",
-                "params": {"model_id": "fal-ai/infinitalk/single-text"},
+                "params": {"model_id": "fal-ai/veo3/fast"},
             }
         ],
     )
@@ -429,12 +429,12 @@ def test_fal_status_endpoint_returns_logs_and_result(monkeypatch):
     assert resp.status_code == 200
     payload = resp.get_json()
     assert payload["request_id"] == "req-200"
-    assert payload["model_id"] == "fal-ai/infinitalk/single-text"
+    assert payload["model_id"] == "fal-ai/veo3/fast"
     assert payload["status_upper"] == "SUCCESS"
     assert payload["logs"] == ["Retry attempt #1", "Retry attempt #2"]
     assert payload["video"]["url"] == "https://cdn.example.com/video.mp4"
-    assert calls["status"] == ("fal-ai/infinitalk/single-text", "req-200", True)
-    assert calls["result"] == ("fal-ai/infinitalk/single-text", "req-200")
+    assert calls["status"] == ("fal-ai/veo3/fast", "req-200", True)
+    assert calls["result"] == ("fal-ai/veo3/fast", "req-200")
 
 
 def test_fal_status_missing_job(monkeypatch):

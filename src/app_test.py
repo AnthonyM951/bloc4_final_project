@@ -11,7 +11,7 @@ FAL_KEY = os.getenv(
     "FAL_KEY", "3e9ddf21-a57e-4b69-9eb9-2d9d336acf92:0296b68b75feab14420a58c753385b05"
 )
 FAL_QUEUE_BASE = os.getenv("FAL_QUEUE_BASE", "https://queue.fal.run")
-MODEL = os.getenv("MODEL_DEFAULT", "fal-ai/ai-avatar/single-text")
+MODEL = os.getenv("MODEL_DEFAULT", "fal-ai/veo3/fast")
 
 
 def _default_payload() -> dict[str, Any]:

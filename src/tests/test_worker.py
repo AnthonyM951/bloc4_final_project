@@ -53,7 +53,7 @@ def test_process_video_job_inserts_file(monkeypatch):
                 "user_id": 7,
                 "prompt": fal_input_payload["prompt"],
                 "params": {
-                    "model_id": "fal-ai/infinitalk/single-text",
+                    "model_id": "fal-ai/veo3/fast",
                     "fal_input": fal_input_payload,
                 },
             }
@@ -91,9 +91,9 @@ def test_process_video_job_inserts_file(monkeypatch):
     assert any(rec.payload.get("external_job_id") == "abc123" for rec in updates)
     assert any(rec.payload.get("status") == "succeeded" for rec in updates)
 
-    assert submitted["args"] == ("fal-ai/infinitalk/single-text",)
+    assert submitted["args"] == ("fal-ai/veo3/fast",)
     assert submitted["kwargs"]["arguments"] == fal_input_payload
-    assert result_calls == [("fal-ai/infinitalk/single-text", "abc123")]
+    assert result_calls == [("fal-ai/veo3/fast", "abc123")]
 
 
 def _queue_single_job(dummy_supabase, fal_input_payload):
@@ -105,7 +105,7 @@ def _queue_single_job(dummy_supabase, fal_input_payload):
                 "user_id": 7,
                 "prompt": fal_input_payload["prompt"],
                 "params": {
-                    "model_id": "fal-ai/infinitalk/single-text",
+                    "model_id": "fal-ai/veo3/fast",
                     "fal_input": fal_input_payload,
                 },
             }

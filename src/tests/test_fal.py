@@ -64,7 +64,7 @@ def test_submit_job_fal(monkeypatch):
 
     body = {
         "user_id": 1,
-        "model_id": "fal-ai/infinitalk/single-text",
+        "model_id": "fal-ai/veo3/fast",
         "prompt": "An elderly man with a white beard and headphones records audio with a microphone. He appears engaged and expressive, suggesting a podcast or voiceover.",
         "text_input": "Spend more time with people who make you feel alive, and less with things that drain your soul.",
         "image_url": "https://v3.fal.media/files/panda/HuM21CXMf0q7OO2zbvwhV_c4533aada79a495b90e50e32dc9b83a8.png",
@@ -87,7 +87,7 @@ def test_submit_job_fal(monkeypatch):
     inserts = [rec for rec in dummy_supabase.records if rec.op == "insert" and rec.table == "jobs"]
     assert inserts and inserts[0].payload["prompt"] == dummy_material.animation_prompt
     params = inserts[0].payload["params"]
-    assert params["model_id"] == "fal-ai/infinitalk/single-text"
+    assert params["model_id"] == "fal-ai/veo3/fast"
     assert params["fal_input"] == captured["payload"]
     assert params["course_material"]["summary"] == dummy_material.script
     assert params["course_material"]["keywords"] == dummy_material.keywords
@@ -96,7 +96,7 @@ def test_submit_job_fal(monkeypatch):
     updates = [rec for rec in dummy_supabase.records if rec.op == "update" and rec.table == "jobs"]
     assert any(rec.payload.get("external_job_id") == "req_123" for rec in updates)
 
-    assert captured["model_id"] == "fal-ai/infinitalk/single-text"
+    assert captured["model_id"] == "fal-ai/veo3/fast"
     assert captured["payload"] == {
         "prompt": dummy_material.animation_prompt,
         "text_input": dummy_material.script,
