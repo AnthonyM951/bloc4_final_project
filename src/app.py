@@ -1,10 +1,9 @@
 import json
 import os
 import re
+from datetime import datetime, timezone
 from functools import wraps
 from time import time
-
-import psycopg2
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import (
     Flask,
@@ -53,6 +52,12 @@ PASSWORD_RE = re.compile(r"^(?=.*[A-Z])(?=.*\d).{8,}$")
 def sanitize_text(text: str) -> str:
     """Nettoyer le texte : autoriser seulement alphanumérique, tiret, underscore"""
     return re.sub(r"[^a-zA-Z0-9_-]", "", text)
+
+
+def current_timestamp() -> str:
+    """Retourne l'horodatage UTC courant au format ISO 8601."""
+
+    return datetime.now(timezone.utc).isoformat()
 
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
@@ -205,7 +210,11 @@ def summarize_text(text: str) -> str:
 
 # 🔑 Client Supabase pour Auth
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY")  # ⚠️ utilise la service_role key
+SUPABASE_KEY = (
+    os.getenv("SUPABASE_SERVICE_KEY")
+    or os.getenv("SUPABASE_KEY")
+    or os.getenv("SUPABASE_ANON_KEY")
+)
 supabase: Client | None = None
 supabase_connected = False
 if SUPABASE_URL and SUPABASE_KEY:
@@ -627,7 +636,10 @@ def fal_webhook():
                 "title": "Video (fal.ai)",
                 "source_url": video_url
             }).execute()
-            supabase.table("jobs").update({"status": "succeeded", "finished_at": "now()"}).eq("id", job_id).execute()
+            supabase.table("jobs").update({
+                "status": "succeeded",
+                "finished_at": current_timestamp()
+            }).eq("id", job_id).execute()
 
         elif status in ("FAILED", "ERROR"):
             supabase.table("jobs").update({
@@ -767,7 +779,7 @@ def _sync_fal_jobs():
             if s in ("QUEUED", "IN_PROGRESS"):
                 supabase.table("jobs").update({
                     "status": "running",
-                    "started_at": "now()"
+                    "started_at": current_timestamp()
                 }).eq("id", job_id).execute()
 
             elif s == "SUCCESS":
@@ -781,7 +793,7 @@ def _sync_fal_jobs():
                 }).execute()
                 supabase.table("jobs").update({
                     "status": "succeeded",
-                    "finished_at": "now()"
+                    "finished_at": current_timestamp()
                 }).eq("id", job_id).execute()
 
             elif s in ("FAILED", "ERROR"):

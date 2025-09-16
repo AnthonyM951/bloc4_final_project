@@ -5,9 +5,11 @@ import requests
 
 # Ajoute le répertoire parent au PYTHONPATH pour import local
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+sys.path.insert(0, os.path.dirname(__file__))
 
 import app as app_module
 from app import app  # type: ignore
+from _supabase_dummy import DummySupabase
 
 
 def test_home_page():
@@ -66,19 +68,12 @@ def test_login_page():
 
 def test_login_fallback(monkeypatch):
     client = app.test_client()
-    # Ensure Supabase and DB connections are not used
     monkeypatch.setattr(app_module, "supabase", None)
-    monkeypatch.setattr(app_module, "conn", None)
 
-    resp = client.post(
-        "/login",
-        json={"user_id": "u1", "email": "user@example.com"},
-    )
-    assert resp.status_code == 200
+    resp = client.post("/login", json={"email": "user@example.com", "password": "secret"})
+    assert resp.status_code == 500
     data = resp.get_json()
-    assert data["user_id"] == "u1"
-    with client.session_transaction() as sess:
-        assert sess["user_id"] == "u1"
+    assert data["error"] == "Supabase client not available"
 
 
 def test_register_page():
@@ -114,32 +109,6 @@ def test_register_validations():
 def test_register_success(monkeypatch):
     client = app.test_client()
 
-    class DummyCursor:
-        def __init__(self):
-            self.executed = None
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            pass
-
-        def execute(self, sql, params):
-            self.executed = (sql, params)
-
-    class DummyConn:
-        def __init__(self):
-            self.cursor_obj = DummyCursor()
-
-        def cursor(self):
-            return self.cursor_obj
-
-        def commit(self):
-            pass
-
-        def rollback(self):
-            pass
-
     class DummyAuth:
         def __init__(self):
             self.params = None
@@ -148,9 +117,8 @@ def test_register_success(monkeypatch):
             self.params = params
             return type("Res", (), {"user": type("U", (), {"id": "12345678"})()})()
 
-    dummy_conn = DummyConn()
-    dummy_supabase = type("Supa", (), {"auth": DummyAuth()})()
-    monkeypatch.setattr(app_module, "conn", dummy_conn)
+    dummy_supabase = DummySupabase()
+    dummy_supabase.auth = DummyAuth()
     monkeypatch.setattr(app_module, "supabase", dummy_supabase)
 
     resp = client.post(
@@ -163,13 +131,19 @@ def test_register_success(monkeypatch):
     assert data["user_id"] == "12345678"
     assert data["username"] == "User"
 
-    sql, params = dummy_conn.cursor_obj.executed
-    assert "INSERT INTO profiles" in sql
-    assert params == ("12345678", "user", 120)  # role et quota par défaut
-
     assert dummy_supabase.auth.params == {
         "email": "user@example.com",
         "password": "Password1",
+    }
+
+    profile_inserts = [
+        rec for rec in dummy_supabase.records if rec.op == "insert" and rec.table == "profiles"
+    ]
+    assert profile_inserts
+    assert profile_inserts[0].payload == {
+        "user_id": "12345678",
+        "role": "user",
+        "gpu_minutes_quota": 120,
     }
 
 

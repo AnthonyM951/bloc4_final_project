@@ -2,153 +2,172 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
+from typing import Any
 
 from celery import Celery
 from dotenv import load_dotenv
+from supabase import Client, create_client
+
 import fal_client
-import psycopg2
 
 load_dotenv()
 
 # Configuration Celery
-celery = Celery(
-    "video_worker",
-    broker=os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0"),
-    backend=os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/0"),
-)
+celery_broker = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
+celery_backend = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/0")
+celery = Celery("video_worker", broker=celery_broker, backend=celery_backend)
 
 # Permet d'exécuter les tâches de manière synchrone si nécessaire
 if os.getenv("CELERY_TASK_ALWAYS_EAGER") == "1":
     celery.conf.task_always_eager = True
 
-# Connexion base de données (Supabase Postgres)
-try:
-    conn = psycopg2.connect(
-        host=os.getenv("SUPABASE_DB_HOST", "db.cryetaumceiljumacrww.supabase.co"),
-        dbname=os.getenv("SUPABASE_DB_NAME", "postgres"),
-        user=os.getenv("SUPABASE_DB_USER", "postgres"),
-        password=os.getenv("SUPABASE_DB_PASSWORD"),
-        port=int(os.getenv("SUPABASE_DB_PORT", "5432")),
-        sslmode="require",
-    )
-except Exception:
-    conn = None
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = (
+    os.getenv("SUPABASE_SERVICE_KEY")
+    or os.getenv("SUPABASE_KEY")
+    or os.getenv("SUPABASE_ANON_KEY")
+)
+
+supabase: Client | None = None
+if SUPABASE_URL and SUPABASE_KEY:
+    try:
+        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+    except Exception:  # pragma: no cover - configuration invalide
+        supabase = None
+
+
+def _now_iso() -> str:
+    """Retourne la date/heure actuelle au format ISO 8601 (UTC)."""
+
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _deserialize_params(raw: Any) -> dict[str, Any]:
+    """Convertit une colonne JSON/texte Supabase en dictionnaire Python."""
+
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw:
+        try:
+            return json.loads(raw)
+        except Exception:  # pragma: no cover - JSON mal formé
+            return {}
+    return {}
+
+
+def _update_job(job_id: int, payload: dict[str, Any]) -> None:
+    """Met à jour un job en ignorant silencieusement les erreurs réseau."""
+
+    if supabase is None:
+        return
+    try:
+        supabase.table("jobs").update(payload).eq("id", job_id).execute()
+    except Exception:  # pragma: no cover - log simplifié
+        pass
 
 
 @celery.task(name="process_video_job")
 def process_video_job(job_id: int) -> None:
-    """Tâche Celery qui invoque fal.ai pour générer une vidéo.
+    """Tâche Celery qui appelle fal.ai puis met à jour Supabase via REST."""
 
-    Cette fonction met à jour l'état du job dans la base de données,
-    appelle fal.ai avec le prompt enregistré et insère une entrée dans
-    la table ``videos`` lorsque le rendu est prêt.
-    """
-    if conn is None:
+    if supabase is None:
         return
 
     try:
-        # Clear any previous failed transaction
-        conn.rollback()
-        # Récupère le prompt et les paramètres (ex: image_url) du job
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT prompt, params FROM jobs WHERE id = %s", (job_id,)
-            )
-            row = cur.fetchone()
-        prompt = row[0] if row else ""
-        raw_params = row[1] if row and len(row) > 1 else "{}"
-        try:
-            params = json.loads(raw_params) if raw_params else {}
-        except Exception:
-            params = {}
-        image_url = params.get("image_url")
+        res = (
+            supabase.table("jobs")
+            .select("id,user_id,prompt,params")
+            .eq("id", job_id)
+            .limit(1)
+            .execute()
+        )
+    except Exception:
+        return
 
-        # Soumet le job à fal.ai pour récupérer un request_id
-        arguments = {"prompt": prompt}
-        if image_url:
-            arguments["image_url"] = image_url
+    if not res.data:
+        return
+
+    job = res.data[0]
+    prompt = job.get("prompt") or ""
+    params = _deserialize_params(job.get("params"))
+    image_url = params.get("image_url")
+    user_id = job.get("user_id")
+
+    arguments: dict[str, Any] = {"prompt": prompt}
+    if image_url:
+        arguments["image_url"] = image_url
+
+    try:
         handle = fal_client.submit(
             "fal-ai/minimax-video/image-to-video", arguments=arguments
         )
         request_id = getattr(handle, "request_id", None)
+    except Exception as exc:
+        _update_job(job_id, {"status": "failed", "error": str(exc)})
+        raise
 
-        # Passe le job en cours d'exécution et enregistre l'ID externe
-        with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE jobs SET status = %s, started_at = now(), external_id = %s WHERE id = %s",
-                ("running", request_id, job_id),
-            )
-            conn.commit()
+    if not request_id:
+        _update_job(job_id, {"status": "failed", "error": "fal.ai request id missing"})
+        return
 
-        # Attente bloquante du résultat du job
+    _update_job(
+        job_id,
+        {
+            "status": "running",
+            "started_at": _now_iso(),
+            "external_job_id": request_id,
+        },
+    )
+
+    try:
         response = fal_client.result(
             "fal-ai/minimax-video/image-to-video", request_id
         )
-
-        # Récupère l'URL du rendu pour l'enregistrer dans la table files
-        video_url = None
-        if isinstance(response, dict):
-            video = response.get("video")
-            if isinstance(video, dict):
-                video_url = video.get("url")
-            elif isinstance(video, str):
-                video_url = video
-            else:
-                video_url = response.get("url")
-
-        file_id = None
-        if video_url:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO files (url, bucket, created_at)
-                    VALUES (%s, %s, now())
-                    RETURNING id
-                    """,
-                    (video_url, "videos"),
-                )
-                row = cur.fetchone()
-                file_id = row[0] if row else None
-                conn.commit()
-
-        # Les champs sont simplifiés pour l'exemple
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO videos (
-                    job_id, user_id, title, duration_seconds,
-                    width, height, fps, file_id, created_at
-                )
-                SELECT id, user_id, %s, %s, %s, %s, %s, %s, now()
-                FROM jobs WHERE id = %s
-                """,
-                (
-                    prompt or "fal.ai video",
-                    5.0,
-                    1280,
-                    720,
-                    30.0,
-                    file_id,
-                    job_id,
-                ),
-            )
-            conn.commit()
-
-        # Marque le job comme terminé
-        with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE jobs SET status = %s, finished_at = now() WHERE id = %s",
-                ("succeeded", job_id),
-            )
-            conn.commit()
-
-    except Exception as exc:  # pragma: no cover - logging simplifié
-        if conn:
-            conn.rollback()
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE jobs SET status = %s, error = %s WHERE id = %s",
-                    ("failed", str(exc), job_id),
-                )
-                conn.commit()
+    except Exception as exc:
+        _update_job(job_id, {"status": "failed", "error": str(exc)})
         raise
+
+    video_url: str | None = None
+    if isinstance(response, dict):
+        video = response.get("video")
+        if isinstance(video, dict):
+            video_url = video.get("url")
+        elif isinstance(video, str):
+            video_url = video
+        else:
+            video_url = response.get("url")
+
+    file_id: int | None = None
+    if video_url:
+        try:
+            file_res = (
+                supabase.table("files")
+                .insert({"url": video_url, "bucket": "videos"})
+                .execute()
+            )
+            if file_res.data:
+                inserted = file_res.data[0]
+                if isinstance(inserted, dict):
+                    file_id = inserted.get("id")
+        except Exception:  # pragma: no cover - insertion optionnelle
+            file_id = None
+
+    video_payload: dict[str, Any] = {
+        "job_id": job_id,
+        "user_id": user_id,
+        "title": prompt or "fal.ai video",
+        "duration_seconds": 5.0,
+        "width": 1280,
+        "height": 720,
+        "fps": 30.0,
+        "file_id": file_id,
+        "created_at": _now_iso(),
+    }
+
+    try:
+        supabase.table("videos").insert(video_payload).execute()
+    except Exception:  # pragma: no cover - log simplifié
+        pass
+
+    _update_job(job_id, {"status": "succeeded", "finished_at": _now_iso()})
