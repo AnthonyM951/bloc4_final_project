@@ -58,6 +58,16 @@ def sanitize_text(text: str) -> str:
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 
 
+def check_ollama_connection(timeout: float = 2.0) -> bool:
+    """Return ``True`` when the Ollama service responds, ``False`` otherwise."""
+
+    try:
+        resp = requests.get(f"{OLLAMA_URL}/api/tags", timeout=timeout)
+        return resp.ok
+    except Exception:
+        return False
+
+
 def ollama_generate(prompt: str, model: str | None = None) -> str:
     """Call a local Ollama model and return the generated text.
 
@@ -393,6 +403,8 @@ def dashboard():
         email=session.get("email"),
         role=session.get("role", "user"),
         gpu_minutes_quota=session.get("gpu_minutes_quota"),
+        ollama_connected=check_ollama_connection(),
+        ollama_url=OLLAMA_URL,
     )
 
 

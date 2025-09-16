@@ -11,6 +11,18 @@
     <p><strong>GPU minutes quota:</strong> {{ gpu_minutes_quota }}</p>
     {% endif %}
   </div>
+  <div class="p-4 rounded-lg border border-slate-700 bg-slate-900/60">
+    <p class="text-xs font-semibold uppercase tracking-wide text-slate-400">Services</p>
+    <p class="mt-2 text-sm">
+      Ollama connection:
+      {% if ollama_connected %}
+      <span class="text-green-400 font-medium">Connected</span>
+      {% else %}
+      <span class="text-red-400 font-medium">Unavailable</span>
+      {% endif %}
+    </p>
+    <p class="mt-1 text-xs text-slate-500 break-words">Endpoint: {{ ollama_url }}</p>
+  </div>
   {% if session.get('role') == 'admin' %}
   <div class="text-right">
     <a href="/admin" class="px-4 py-2 rounded bg-indigo-500 hover:bg-indigo-400 text-slate-900 font-semibold">Admin Dashboard</a>
@@ -21,6 +33,12 @@
     <input id="image-url" class="w-full px-4 py-2 rounded bg-slate-900 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-teal-500" type="text" placeholder="Image URL" required />
     <button class="w-full py-2 rounded bg-teal-500 hover:bg-teal-400 text-slate-900 font-semibold" type="submit">Submit</button>
   </form>
+  <section class="p-4 rounded-lg border border-slate-700 bg-slate-900/40 space-y-2">
+    <h2 class="text-sm font-semibold text-slate-200">Wikipedia scraping debug</h2>
+    <div id="scrape-debug" class="text-sm text-slate-300">
+      Submit a prompt to trigger the Wikipedia scraping pipeline and the summary will be displayed here.
+    </div>
+  </section>
   <div class="text-right">
     <button id="refresh-jobs" class="px-4 py-2 rounded bg-teal-500 hover:bg-teal-400 text-slate-900 font-semibold">Refresh Jobs</button>
   </div>
@@ -39,6 +57,65 @@
 </div>
 <script>
 const USER_ID = {{ user_id | tojson }};
+const debugOutput = document.getElementById('scrape-debug');
+
+function updateDebugMessage(message, tone = 'info') {
+  if (!debugOutput) return;
+  debugOutput.innerHTML = '';
+  const p = document.createElement('p');
+  p.textContent = message;
+  if (tone === 'error') {
+    p.className = 'text-red-400';
+  } else if (tone === 'success') {
+    p.className = 'text-green-400';
+  } else {
+    p.className = 'text-slate-300';
+  }
+  debugOutput.appendChild(p);
+}
+
+function renderScrapeResults(data, jobId) {
+  if (!debugOutput) return;
+  debugOutput.innerHTML = '';
+
+  const heading = document.createElement('p');
+  heading.className = 'text-xs uppercase tracking-wide text-slate-400';
+  heading.textContent = jobId ? `Job #${jobId} scraping results` : 'Scraping results';
+  debugOutput.appendChild(heading);
+
+  const keywordsLine = document.createElement('p');
+  keywordsLine.className = 'text-slate-300 mt-2';
+  const keywords = Array.isArray(data.keywords) && data.keywords.length ? data.keywords.join(', ') : 'N/A';
+  keywordsLine.textContent = `Keywords: ${keywords}`;
+  debugOutput.appendChild(keywordsLine);
+
+  const summary = document.createElement('p');
+  summary.className = 'text-slate-200 mt-2';
+  summary.textContent = data.summary ? data.summary : 'No summary generated.';
+  debugOutput.appendChild(summary);
+
+  if (data.results && typeof data.results === 'object') {
+    const list = document.createElement('ul');
+    list.className = 'list-disc list-inside mt-2 space-y-1 text-slate-400';
+    Object.entries(data.results).forEach(([keyword, links]) => {
+      const li = document.createElement('li');
+      if (Array.isArray(links) && links.length) {
+        const displayLinks = links.slice(0, 3).join(', ');
+        li.textContent = `${keyword}: ${displayLinks}`;
+      } else {
+        li.textContent = `${keyword}: No links found`;
+      }
+      list.appendChild(li);
+    });
+    debugOutput.appendChild(list);
+  }
+}
+
+function normalizeError(err) {
+  if (err instanceof Error) return err.message;
+  return typeof err === 'string' ? err : JSON.stringify(err);
+}
+
 async function loadJobs() {
   const res = await fetch(`/list_jobs/${USER_ID}`);
   const jobs = await res.json();
@@ -64,15 +141,66 @@ document.getElementById('job-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const prompt = document.getElementById('prompt').value;
   const imageUrl = document.getElementById('image-url').value;
-  await fetch('/submit_job', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ user_id: USER_ID, prompt, params: { image_url: imageUrl } })
-  });
-  loadJobs();
+  try {
+    const jobRes = await fetch('/submit_job', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ user_id: USER_ID, prompt, params: { image_url: imageUrl } })
+    });
+
+    let jobData;
+    if (jobRes.ok) {
+      jobData = await jobRes.json();
+    } else {
+      let detail = `${jobRes.status} ${jobRes.statusText}`;
+      try {
+        const payload = await jobRes.json();
+        if (payload && payload.error) {
+          detail = payload.error;
+        }
+      } catch (_) {}
+      throw new Error(detail);
+    }
+
+    if (e.target && typeof e.target.reset === 'function') {
+      e.target.reset();
+    }
+
+    loadJobs();
+    updateDebugMessage(`Job #${jobData.id} submitted. Running Wikipedia scraping debug...`);
+
+    try {
+      const summaryRes = await fetch('/wiki_summary', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ query: prompt })
+      });
+
+      if (!summaryRes.ok) {
+        let detail = `${summaryRes.status} ${summaryRes.statusText}`;
+        try {
+          const payload = await summaryRes.json();
+          if (payload && payload.error) {
+            detail = payload.error;
+          }
+        } catch (_) {}
+        throw new Error(detail);
+      }
+
+      const data = await summaryRes.json();
+      renderScrapeResults(data, jobData.id);
+    } catch (err) {
+      updateDebugMessage(`Scraping debug failed: ${normalizeError(err)}`, 'error');
+    }
+  } catch (err) {
+    updateDebugMessage(`Job submission failed: ${normalizeError(err)}`, 'error');
+  }
 });
 
-document.getElementById('refresh-jobs').addEventListener('click', loadJobs);
+const refreshButton = document.getElementById('refresh-jobs');
+if (refreshButton) {
+  refreshButton.addEventListener('click', loadJobs);
+}
 
 document.addEventListener('DOMContentLoaded', loadJobs);
 </script>

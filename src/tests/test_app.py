@@ -210,3 +210,31 @@ def test_wiki_summary(monkeypatch):
     data = resp.get_json()
     assert data["keywords"] == ["python", "language"]
     assert data["summary"] == "summary"
+
+
+def test_dashboard_displays_ollama_status(monkeypatch):
+    client = app.test_client()
+
+    monkeypatch.setattr(app_module, "check_ollama_connection", lambda: True)
+
+    with client.session_transaction() as sess:
+        sess["user_id"] = "user-123"
+        sess["email"] = "user@example.com"
+
+    resp = client.get("/dashboard")
+    assert resp.status_code == 200
+    page = resp.data.decode("utf-8")
+    assert "Ollama connection" in page
+    assert "Connected" in page
+    assert 'id="scrape-debug"' in page
+
+
+def test_check_ollama_connection_handles_errors(monkeypatch):
+    class DummyException(Exception):
+        pass
+
+    def _raise(*args, **kwargs):
+        raise DummyException()
+
+    monkeypatch.setattr(app_module.requests, "get", _raise)
+    assert app_module.check_ollama_connection() is False
