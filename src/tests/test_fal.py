@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -134,6 +135,15 @@ def test_fal_webhook_verification(monkeypatch):
     )
 
     assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["status"] == "OK"
+    assert data["request_id"] == "req-1"
+    webhook_event = data.get("webhook_event")
+    assert webhook_event
+    assert webhook_event["status"] == "OK"
+    assert webhook_event["request_id"] == "req-1"
+    content = webhook_event.get("content") or {}
+    assert content.get("video", {}).get("url") == "http://cdn/video.mp4"
     assert called["headers"]["X-Fal-Webhook-Request-Id"] == "req-1"
     assert isinstance(called["body"], (bytes, bytearray))
     assert b"req-1" in called["body"]
@@ -149,9 +159,24 @@ def test_fal_webhook_verification(monkeypatch):
         if rec.op == "update" and rec.table == "jobs" and "params" in rec.payload
     ]
     assert param_updates
-    fal_result = param_updates[0].payload["params"].get("fal_result")
-    assert fal_result and fal_result["video"]["url"] == "http://cdn/video.mp4"
+    params_payloads = [rec.payload["params"] for rec in param_updates]
+
+    fal_payloads = [p for p in params_payloads if p.get("fal_result")]
+    assert fal_payloads
+    fal_result = fal_payloads[-1]["fal_result"]
+    assert fal_result["video"]["url"] == "http://cdn/video.mp4"
     assert fal_result["payload"]["video"]["url"] == "http://cdn/video.mp4"
+
+    debug_payloads = [p.get("debug") for p in params_payloads if p.get("debug")]
+    assert debug_payloads
+    latest_debug = debug_payloads[-1]
+    if isinstance(latest_debug, str):
+        latest_debug = json.loads(latest_debug)
+    last_event = latest_debug.get("last_webhook_event") or {}
+    assert last_event.get("status") == "OK"
+    assert last_event.get("request_id") == "req-1"
+    last_content = last_event.get("content") or {}
+    assert last_content.get("video", {}).get("url") == "http://cdn/video.mp4"
 
 
 def test_fal_webhook_rejects_invalid_signature(monkeypatch):
