@@ -1588,6 +1588,34 @@ def submit_job_fal():
 
 
 
+@app.get("/job/<int:job_id>")
+def get_job(job_id: int):
+    """Return a single job enriched with its video link when available."""
+
+    if supabase is None:
+        return jsonify({"error": "Supabase not available"}), 500
+
+    try:
+        res = (
+            supabase.table("jobs")
+            .select("*")
+            .eq("id", job_id)
+            .limit(1)
+            .execute()
+        )
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    rows = getattr(res, "data", None) or []
+    if not rows:
+        return jsonify({"error": "job not found"}), 404
+
+    first_row = rows[0]
+    job_payload = dict(first_row) if isinstance(first_row, Mapping) else first_row
+    _merge_job_video_urls([job_payload])
+    return jsonify(job_payload)
+
+
 @app.get("/list_jobs/<user_id>")
 def list_jobs(user_id):
     if supabase is None:
