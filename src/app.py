@@ -1361,7 +1361,7 @@ def monitoring_data():
     try:
         job_res = (
             supabase.table("jobs")
-            .select("status, submitted_at, started_at, finished_at, updated_at")
+            .select("status, submitted_at, started_at, finished_at")
             .order("submitted_at", desc=True)
             .limit(500)
             .execute()
