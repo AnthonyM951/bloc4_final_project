@@ -390,6 +390,60 @@ def test_get_job_missing_returns_404(monkeypatch):
     assert data["error"] == "job not found"
 
 
+def test_admin_send_alert_requires_admin():
+    client = app.test_client()
+
+    with client.session_transaction() as sess:
+        sess["role"] = "user"
+
+    resp = client.post("/admin/send_alert")
+
+    assert resp.status_code == 403
+
+
+def test_admin_send_alert_success(monkeypatch):
+    client = app.test_client()
+    captured: dict[str, str] = {}
+
+    def fake_send(subject, body):
+        captured["subject"] = subject
+        captured["body"] = body
+
+    monkeypatch.setattr(app_module, "send_alert_email", fake_send)
+
+    with client.session_transaction() as sess:
+        sess["role"] = "admin"
+
+    resp = client.post(
+        "/admin/send_alert",
+        json={"subject": "Test", "message": "Hello Michel"},
+    )
+
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["status"] == "sent"
+    assert captured["subject"] == "Test"
+    assert captured["body"] == "Hello Michel"
+
+
+def test_admin_send_alert_handles_runtime_error(monkeypatch):
+    client = app.test_client()
+
+    def fake_send(subject, body):  # pragma: no cover - levée volontaire
+        raise RuntimeError("SMTP_HOST not configured")
+
+    monkeypatch.setattr(app_module, "send_alert_email", fake_send)
+
+    with client.session_transaction() as sess:
+        sess["role"] = "admin"
+
+    resp = client.post("/admin/send_alert")
+
+    assert resp.status_code == 400
+    payload = resp.get_json()
+    assert "SMTP_HOST" in payload["error"]
+
+
 def test_fal_status_endpoint_returns_logs_and_result(monkeypatch):
     client = app.test_client()
     dummy_supabase = DummySupabase()

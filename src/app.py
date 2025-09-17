@@ -2,9 +2,11 @@ import json
 import math
 import os
 import re
+import smtplib
 from dataclasses import dataclass
 from collections import defaultdict
 from datetime import date, datetime, timezone
+from email.message import EmailMessage
 from functools import wraps
 from threading import Thread
 from time import sleep, time
@@ -89,6 +91,13 @@ app.config["JSONIFY_PRETTYPRINT_REGULAR"] = False
 MODEL_DEFAULT = os.getenv("MODEL_DEFAULT", "fal-ai/veo3/fast")
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "t", "yes", "y"}
+
+
 def _env_float(name: str, default: float) -> float:
     raw_value = os.getenv(name)
     if raw_value is None:
@@ -119,6 +128,54 @@ class CourseMaterial:
 # Regex pour validation email et mot de passe
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 PASSWORD_RE = re.compile(r"^(?=.*[A-Z])(?=.*\d).{8,}$")
+
+
+SMTP_HOST = os.getenv("SMTP_HOST")
+SMTP_PORT = os.getenv("SMTP_PORT", "587")
+SMTP_USERNAME = os.getenv("SMTP_USERNAME")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
+SMTP_USE_TLS = _env_bool("SMTP_USE_TLS", True)
+ALERT_EMAIL_RECIPIENT = os.getenv(
+    "ALERT_EMAIL_RECIPIENT", "michelanthony.apb@gmail.com"
+)
+ALERT_EMAIL_SENDER = os.getenv("ALERT_EMAIL_SENDER")
+ALERT_EMAIL_SUBJECT = os.getenv(
+    "ALERT_EMAIL_SUBJECT", "Alerte supervision vidéo IA"
+)
+ALERT_EMAIL_DEFAULT_BODY = os.getenv(
+    "ALERT_EMAIL_DEFAULT_BODY",
+    "Une alerte a été déclenchée depuis le tableau de bord administrateur.",
+)
+
+
+def send_alert_email(subject: str, body: str) -> None:
+    """Envoie un e-mail d'alerte via le serveur SMTP configuré."""
+
+    if not SMTP_HOST:
+        raise RuntimeError("SMTP_HOST not configured")
+
+    try:
+        port = int(SMTP_PORT)
+    except (TypeError, ValueError):
+        raise RuntimeError("Invalid SMTP_PORT configuration") from None
+
+    sender = ALERT_EMAIL_SENDER or SMTP_USERNAME or "no-reply@example.com"
+
+    message = EmailMessage()
+    message["Subject"] = subject
+    message["From"] = sender
+    message["To"] = ALERT_EMAIL_RECIPIENT
+    message.set_content(body)
+
+    try:
+        with smtplib.SMTP(SMTP_HOST, port, timeout=10) as smtp:
+            if SMTP_USE_TLS:
+                smtp.starttls()
+            if SMTP_USERNAME and SMTP_PASSWORD:
+                smtp.login(SMTP_USERNAME, SMTP_PASSWORD)
+            smtp.send_message(message)
+    except smtplib.SMTPException as exc:
+        raise RuntimeError(f"SMTP error: {exc}") from exc
 
 
 def _extract_video_url(payload: object) -> str | None:
@@ -1526,6 +1583,25 @@ def dashboard():
 def admin_dashboard():
     """Tableau de bord administrateur"""
     return render_template("admin_dashboard.html")
+
+
+@app.post("/admin/send_alert")
+@require_admin
+def admin_send_alert():
+    """Déclenche l'envoi d'un e-mail d'alerte vers l'administrateur."""
+
+    payload = request.get_json(silent=True) or {}
+    subject = payload.get("subject") or ALERT_EMAIL_SUBJECT
+    body = payload.get("message") or ALERT_EMAIL_DEFAULT_BODY
+
+    try:
+        send_alert_email(subject, body)
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:  # pragma: no cover - erreurs SMTP imprévisibles
+        return jsonify({"error": f"Failed to send alert email: {exc}"}), 500
+
+    return jsonify({"status": "sent", "recipient": ALERT_EMAIL_RECIPIENT})
 
 
 def fetch_latest_ci_status() -> tuple[dict[str, str | None], bool]:
