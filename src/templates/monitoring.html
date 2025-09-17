@@ -1,12 +1,11 @@
 {% extends "base.html" %}
 {% block title %}Supervision & alertes{% endblock %}
 {% block content %}
-<section class="space-y-10">
-  <header class="text-center space-y-3">
+<section class="space-y-8">
+  <header class="text-center space-y-2">
     <h1 class="text-3xl font-bold text-teal-300">Supervision de la plateforme DATA</h1>
     <p class="text-slate-300 max-w-3xl mx-auto">
-      Cette présentation centralise les objectifs, les composants, les indicateurs, les outils, les alertes et les visualisations
-      qui assurent le bon fonctionnement de l'architecture DATA.
+      Cette page synthétise les indicateurs clés, les outils et les alertes mis en place pour garantir le bon fonctionnement de notre architecture DATA.
     </p>
   </header>
 
@@ -24,7 +23,7 @@
     </article>
 
     <article class="bg-slate-900/70 border border-slate-700 rounded-xl p-6 shadow-lg shadow-slate-900/40">
-      <h2 class="text-xl font-semibold text-teal-200 mb-4">Composants surveillés</h2>
+      <h2 class="text-xl font-semibold text-teal-200 mb-4">Composants suivis</h2>
       <ul class="space-y-3 text-sm leading-relaxed text-slate-200">
         {% for component in data.components %}
         <li>
@@ -53,7 +52,7 @@
 
   <section class="grid gap-6 md:grid-cols-2">
     <article class="bg-slate-900/70 border border-slate-700 rounded-xl p-6 shadow-lg shadow-slate-900/40">
-      <h2 class="text-xl font-semibold text-teal-200 mb-4">Outils &amp; configuration</h2>
+      <h2 class="text-xl font-semibold text-teal-200 mb-4">Outils et configuration</h2>
       <ul class="space-y-3 text-sm text-slate-200">
         {% for tool in data.tools %}
         <li>
@@ -68,7 +67,7 @@
     </article>
 
     <article class="bg-slate-900/70 border border-slate-700 rounded-xl p-6 shadow-lg shadow-slate-900/40">
-      <h2 class="text-xl font-semibold text-teal-200 mb-4">Système d'alertes</h2>
+      <h2 class="text-xl font-semibold text-teal-200 mb-4">Alertes & escalade</h2>
       <ul class="space-y-3 text-sm text-slate-200">
         {% for alert in data.alerts %}
         <li>
@@ -81,7 +80,7 @@
   </section>
 
   <section class="bg-slate-900/70 border border-slate-700 rounded-xl p-6 shadow-lg shadow-slate-900/40">
-    <h2 class="text-xl font-semibold text-teal-200 mb-4">Visualisation des indicateurs</h2>
+    <h2 class="text-xl font-semibold text-teal-200 mb-4">Visualisations disponibles</h2>
     <div class="grid gap-4 md:grid-cols-2">
       {% for viz in data.visualisations %}
       <div class="bg-slate-900 border border-slate-800 rounded-lg p-4">
