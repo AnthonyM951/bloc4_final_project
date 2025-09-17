@@ -283,6 +283,7 @@ def _aggregate_job_metrics(rows: Sequence[Mapping[str, Any]] | Sequence[dict[str
             row.get("finished_at")
             or row.get("created_at")
             or row.get("submitted_at")
+            or row.get("started_at")
             or row.get("updated_at")
         )
         ts = _parse_timestamp(ts_value)
@@ -1360,8 +1361,8 @@ def monitoring_data():
     try:
         job_res = (
             supabase.table("jobs")
-            .select("status, created_at, submitted_at, finished_at, updated_at")
-            .order("created_at", desc=True)
+            .select("status, submitted_at, started_at, finished_at, updated_at")
+            .order("submitted_at", desc=True)
             .limit(500)
             .execute()
         )
