@@ -435,7 +435,7 @@ def _merge_job_video_urls(jobs: list[dict[str, Any]]) -> None:
         video_rows: list[Mapping[str, Any]] = []
     else:
         video_rows = getattr(video_res, "data", None) or []
-
+    print('test')
     video_map: dict[str, str] = {}
     for row in video_rows:
         job_id = row.get("job_id")
