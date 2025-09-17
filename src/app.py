@@ -1075,6 +1075,95 @@ ALLOWED_METRICS_IPS = set(
 )
 
 
+MONITORING_DASHBOARD = {
+    "objectives": [
+        "Détecter rapidement les incidents et garantir la disponibilité des traitements IA",
+        "Assurer la traçabilité des exécutions et des ressources consommées",
+        "Aider l'équipe à comprendre les tendances de charge et d'erreurs",
+    ],
+    "components": [
+        {
+            "name": "Pipelines Airflow",
+            "description": "Suivi du DAG de génération vidéo : statut des tâches, durée d'exécution et historique des relances.",
+        },
+        {
+            "name": "Workers GPU",
+            "description": "Vérification de la disponibilité des workers IA et de leur consommation de ressources.",
+        },
+        {
+            "name": "Services API & Auth",
+            "description": "Surveillance des erreurs HTTP, des temps de réponse et du journal d'authentification.",
+        },
+    ],
+    "metrics": [
+        {
+            "name": "Nombre de jobs traités",
+            "description": "Compteur quotidien et par run Airflow pour vérifier la cadence des générateurs.",
+            "threshold": "Alerte si aucune exécution sur 2 heures ouvrées",
+        },
+        {
+            "name": "Temps moyen de génération",
+            "description": "Histogramme Prometheus des durées de traitement pour identifier les dérives de performance.",
+            "threshold": "Alerte si médiane > 8 min sur 3 runs",
+        },
+        {
+            "name": "Consommation GPU",
+            "description": "Collecte via exporter nvidia pour suivre l'utilisation mémoire et compute.",
+            "threshold": "Alerte si utilisation > 90% pendant 30 min",
+        },
+    ],
+    "tools": [
+        {
+            "name": "Loki",
+            "role": "Centralisation des logs applicatifs et Airflow pour faciliter la recherche d'erreurs.",
+            "details": "Pipelines configurés avec labels environnement/service pour filtrage rapide.",
+        },
+        {
+            "name": "Grafana",
+            "role": "Tableaux de bord combinant métriques Prometheus et logs Loki.",
+            "details": "Tableaux : santé Airflow, disponibilité GPU, suivi des requêtes API.",
+        },
+        {
+            "name": "Airflow UI",
+            "role": "Visualisation native des DAGs, logs de tâches et triggers manuels.",
+            "details": "Accès restreint aux opérateurs via SSO interne.",
+        },
+    ],
+    "alerts": [
+        {
+            "trigger": "Taux d'échec supérieur à 5%",
+            "action": "Notification Slack #data-ops avec résumé des tâches en erreur et lien Grafana.",
+        },
+        {
+            "trigger": "Indisponibilité d'un worker GPU",
+            "action": "Escalade vers l'astreinte via PagerDuty et création d'un ticket incident.",
+        },
+        {
+            "trigger": "Temps de génération anormal",
+            "action": "Alerte e-mail au Product Owner avec graphique associé pour analyse.",
+        },
+    ],
+    "visualisations": [
+        {
+            "name": "Santé des DAGs",
+            "description": "Tableau Grafana combinant statut du dernier run, backlog et temps moyen par tâche.",
+        },
+        {
+            "name": "Performance GPU",
+            "description": "Courbes temps réel d'utilisation GPU/CPU et heatmap des jobs les plus gourmands.",
+        },
+        {
+            "name": "Suivi des erreurs applicatives",
+            "description": "Exploration des logs Loki filtrée par service avec mise en avant des codes 4xx/5xx.",
+        },
+        {
+            "name": "Disponibilité API",
+            "description": "Graphiques de latence p95 et taux de requêtes réussies vs erreurs.",
+        },
+    ],
+}
+
+
 @app.context_processor
 def inject_supabase_status():
     """Injecte l'état de connexion Supabase dans les templates"""
@@ -1121,6 +1210,12 @@ def metrics():
 def home():
     """Page d'accueil HTML"""
     return render_template("index.html")
+
+
+@app.get("/monitoring")
+def monitoring_page():
+    """Page de synthèse du dispositif de supervision et d'alertes."""
+    return render_template("monitoring.html", data=MONITORING_DASHBOARD)
 
 
 @app.get("/api")
