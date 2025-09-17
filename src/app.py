@@ -3,7 +3,8 @@ import math
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from collections import defaultdict
+from datetime import date, datetime, timezone
 from functools import wraps
 from threading import Thread
 from time import sleep, time
@@ -207,6 +208,134 @@ def _coerce_mapping(value: object) -> dict[str, Any]:
         if isinstance(parsed, Mapping):
             return dict(parsed)
     return {}
+
+
+def _parse_timestamp(value: object) -> datetime | None:
+    """Convert Supabase timestamp strings into aware ``datetime`` objects."""
+
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    if not isinstance(value, str):
+        return None
+
+    raw = value.strip()
+    if not raw:
+        return None
+
+    candidates = {raw, raw.replace("Z", "+00:00")}
+    if "." in raw:
+        base, _, remainder = raw.partition(".")
+        if remainder:
+            # Conserver le fuseau horaire éventuel après les microsecondes
+            if "+" in remainder:
+                suffix = "+" + remainder.split("+", 1)[1]
+                candidates.add(f"{base}{suffix}")
+            elif "-" in remainder:
+                suffix = "-" + remainder.split("-", 1)[1]
+                candidates.add(f"{base}{suffix}")
+            else:
+                candidates.add(base)
+
+    for candidate in candidates:
+        try:
+            parsed = datetime.fromisoformat(candidate)
+        except ValueError:
+            continue
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    return None
+
+
+def _aggregate_job_metrics(rows: Sequence[Mapping[str, Any]] | Sequence[dict[str, Any]]):
+    """Compute success/failure metrics and time series for job rows."""
+
+    totals = {"jobs": 0, "success": 0, "failed": 0, "other": 0}
+    status_breakdown: dict[str, int] = defaultdict(int)
+    timeline: dict[date, dict[str, int]] = defaultdict(
+        lambda: {"success": 0, "failed": 0, "total": 0}
+    )
+
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+
+        status = str(row.get("status") or "").strip().lower()
+        label = status or "unknown"
+        status_breakdown[label] += 1
+        totals["jobs"] += 1
+
+        is_success = status in {"succeeded", "success", "completed", "done"}
+        is_failed = status in {"failed", "error", "cancelled", "canceled"}
+
+        if is_success:
+            totals["success"] += 1
+        elif is_failed:
+            totals["failed"] += 1
+        else:
+            totals["other"] += 1
+
+        ts_value = (
+            row.get("finished_at")
+            or row.get("created_at")
+            or row.get("submitted_at")
+            or row.get("updated_at")
+        )
+        ts = _parse_timestamp(ts_value)
+        if not ts:
+            continue
+
+        bucket = ts.date()
+        bucket_counts = timeline[bucket]
+        bucket_counts["total"] += 1
+        if is_success:
+            bucket_counts["success"] += 1
+        elif is_failed:
+            bucket_counts["failed"] += 1
+
+    if totals["jobs"]:
+        totals["success_rate"] = round(
+            (totals["success"] / totals["jobs"]) * 100, 2
+        )
+    else:
+        totals["success_rate"] = 0.0
+
+    sorted_days = sorted(timeline.keys())
+    timeline_payload = {
+        "labels": [day.isoformat() for day in sorted_days],
+        "success": [timeline[day]["success"] for day in sorted_days],
+        "failed": [timeline[day]["failed"] for day in sorted_days],
+        "total": [timeline[day]["total"] for day in sorted_days],
+    }
+
+    return {
+        "totals": totals,
+        "timeline": timeline_payload,
+        "status_breakdown": dict(sorted(status_breakdown.items())),
+    }
+
+
+def _empty_monitoring_payload() -> dict[str, Any]:
+    """Return a baseline payload for the monitoring dashboard API."""
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "supabase_connected": supabase_connected,
+        "totals": {
+            "jobs": 0,
+            "success": 0,
+            "failed": 0,
+            "other": 0,
+            "success_rate": 0.0,
+        },
+        "timeline": {"labels": [], "success": [], "failed": [], "total": []},
+        "status_breakdown": {},
+        "users": {"count": 0},
+    }
 
 
 def _normalize_job_id(value: object) -> str | int | None:
@@ -1216,6 +1345,68 @@ def home():
 def monitoring_page():
     """Page de synthèse du dispositif de supervision et d'alertes."""
     return render_template("monitoring.html", data=MONITORING_DASHBOARD)
+
+
+@app.get("/monitoring/data")
+def monitoring_data():
+    """Données agrégées pour la page de supervision (graphes dynamiques)."""
+
+    payload = _empty_monitoring_payload()
+
+    if supabase is None:
+        payload["error"] = "Supabase not available"
+        return jsonify(payload)
+
+    try:
+        job_res = (
+            supabase.table("jobs")
+            .select("status, created_at, submitted_at, finished_at, updated_at")
+            .order("created_at", desc=True)
+            .limit(500)
+            .execute()
+        )
+    except Exception as exc:
+        payload["error"] = f"Unable to load jobs: {exc}"
+        return jsonify(payload)
+
+    job_rows = getattr(job_res, "data", None) or []
+    payload.update(_aggregate_job_metrics(job_rows))
+    payload["totals"]["sample_size"] = len(job_rows)
+
+    try:
+        user_res = (
+            supabase.table("profiles")
+            .select("user_id, created_at", count="exact")
+            .order("created_at", desc=True)
+            .limit(500)
+            .execute()
+        )
+    except Exception as exc:
+        payload["users"]["error"] = str(exc)
+    else:
+        user_rows = getattr(user_res, "data", None) or []
+        count_value = getattr(user_res, "count", None)
+        if isinstance(count_value, int):
+            payload["users"]["count"] = count_value
+        else:
+            payload["users"]["count"] = len(user_rows)
+
+        user_timeline: dict[date, int] = defaultdict(int)
+        for row in user_rows:
+            if not isinstance(row, Mapping):
+                continue
+            created = _parse_timestamp(row.get("created_at"))
+            if created:
+                user_timeline[created.date()] += 1
+
+        if user_timeline:
+            sorted_days = sorted(user_timeline.keys())
+            payload["users"]["timeline"] = {
+                "labels": [day.isoformat() for day in sorted_days],
+                "counts": [user_timeline[day] for day in sorted_days],
+            }
+
+    return jsonify(payload)
 
 
 @app.get("/api")

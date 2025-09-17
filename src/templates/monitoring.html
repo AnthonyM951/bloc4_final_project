@@ -9,6 +9,57 @@
     </p>
   </header>
 
+  <section class="bg-slate-900/70 border border-slate-700 rounded-xl p-6 shadow-lg shadow-slate-900/40 space-y-6">
+    <div class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+      <div>
+        <h2 class="text-xl font-semibold text-teal-200">Indicateurs dynamiques</h2>
+        <p class="text-sm text-slate-300">Statistiques consolidées depuis Supabase sur les jobs vidéos et les utilisateurs.</p>
+      </div>
+      <p id="data-refreshed" class="text-xs text-slate-400">Dernière mise à jour : —</p>
+    </div>
+
+    <div class="grid gap-4 sm:grid-cols-3">
+      <div class="bg-slate-950/40 border border-slate-800 rounded-lg p-4">
+        <p class="text-xs uppercase tracking-wide text-slate-400">Jobs analysés</p>
+        <p id="jobs-total" class="text-3xl font-semibold text-slate-100">—</p>
+        <p id="jobs-sample-note" class="text-xs text-slate-500 mt-1">Charge des derniers jobs en cours.</p>
+      </div>
+      <div class="bg-slate-950/40 border border-slate-800 rounded-lg p-4">
+        <p class="text-xs uppercase tracking-wide text-slate-400">Taux de succès</p>
+        <p id="success-rate" class="text-3xl font-semibold text-emerald-300">—%</p>
+        <p class="text-xs text-slate-500 mt-1">Succès : <span id="jobs-success">—</span> · Échecs : <span id="jobs-failed">—</span></p>
+      </div>
+      <div class="bg-slate-950/40 border border-slate-800 rounded-lg p-4">
+        <p class="text-xs uppercase tracking-wide text-slate-400">Utilisateurs enregistrés</p>
+        <p id="user-count" class="text-3xl font-semibold text-teal-300">—</p>
+        <p id="users-note" class="text-xs text-slate-500 mt-1">Suivi quotidien des inscriptions.</p>
+      </div>
+    </div>
+
+    <div class="grid gap-6 md:grid-cols-2">
+      <div class="bg-slate-950/40 border border-slate-800 rounded-lg p-4 space-y-4">
+        <div>
+          <h3 class="text-lg font-semibold text-slate-100">Répartition des statuts</h3>
+          <p class="text-xs text-slate-400">Comparaison des jobs réussis, en échec ou en cours.</p>
+        </div>
+        <div class="h-64">
+          <canvas id="statusChart" class="w-full h-full"></canvas>
+        </div>
+      </div>
+      <div class="bg-slate-950/40 border border-slate-800 rounded-lg p-4 space-y-4">
+        <div>
+          <h3 class="text-lg font-semibold text-slate-100">Tendance quotidienne des jobs</h3>
+          <p class="text-xs text-slate-400">Volume des vidéos générées et statut associés sur les derniers jours.</p>
+        </div>
+        <div class="h-64">
+          <canvas id="timelineChart" class="w-full h-full"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <p id="monitoring-error" class="text-sm text-amber-300 hidden"></p>
+  </section>
+
   <div class="grid gap-6 md:grid-cols-2">
     <article class="bg-slate-900/70 border border-slate-700 rounded-xl p-6 shadow-lg shadow-slate-900/40">
       <h2 class="text-xl font-semibold text-teal-200 mb-4">Objectifs de supervision</h2>
@@ -91,4 +142,219 @@
     </div>
   </section>
 </section>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+  document.addEventListener("DOMContentLoaded", () => {
+    const statusCanvas = document.getElementById("statusChart");
+    const timelineCanvas = document.getElementById("timelineChart");
+    const jobsTotalEl = document.getElementById("jobs-total");
+    const jobsSuccessEl = document.getElementById("jobs-success");
+    const jobsFailedEl = document.getElementById("jobs-failed");
+    const jobsSampleNoteEl = document.getElementById("jobs-sample-note");
+    const successRateEl = document.getElementById("success-rate");
+    const userCountEl = document.getElementById("user-count");
+    const usersNoteEl = document.getElementById("users-note");
+    const refreshedEl = document.getElementById("data-refreshed");
+    const errorEl = document.getElementById("monitoring-error");
+
+    let statusChart;
+    let timelineChart;
+
+    function setTextContent(el, text) {
+      if (el) {
+        el.textContent = text;
+      }
+    }
+
+    function renderStatusChart(breakdown) {
+      if (!statusCanvas) return;
+      const labels = Object.keys(breakdown || {});
+      const values = labels.map((label) => breakdown[label]);
+      const palette = labels.map((label) => {
+        if (["succeeded", "success", "completed", "done"].includes(label)) {
+          return "#34d399";
+        }
+        if (["failed", "error", "cancelled", "canceled"].includes(label)) {
+          return "#f87171";
+        }
+        return "#38bdf8";
+      });
+
+      if (statusChart) {
+        statusChart.destroy();
+      }
+
+      statusChart = new Chart(statusCanvas, {
+        type: "doughnut",
+        data: {
+          labels,
+          datasets: [
+            {
+              data: values,
+              backgroundColor: palette,
+              borderWidth: 0,
+            },
+          ],
+        },
+        options: {
+          plugins: {
+            legend: {
+              position: "bottom",
+              labels: { color: "#e2e8f0" },
+            },
+          },
+        },
+      });
+    }
+
+    function renderTimelineChart(timeline) {
+      if (!timelineCanvas) return;
+
+      const labels = timeline?.labels || [];
+      const total = timeline?.total || [];
+      const success = timeline?.success || [];
+      const failed = timeline?.failed || [];
+
+      if (timelineChart) {
+        timelineChart.destroy();
+      }
+
+      timelineChart = new Chart(timelineCanvas, {
+        type: "line",
+        data: {
+          labels,
+          datasets: [
+            {
+              label: "Succès",
+              data: success,
+              borderColor: "#34d399",
+              backgroundColor: "rgba(52, 211, 153, 0.15)",
+              tension: 0.3,
+              fill: true,
+            },
+            {
+              label: "Échecs",
+              data: failed,
+              borderColor: "#f87171",
+              backgroundColor: "rgba(248, 113, 113, 0.15)",
+              tension: 0.3,
+              fill: true,
+            },
+            {
+              label: "Total",
+              data: total,
+              borderColor: "#38bdf8",
+              backgroundColor: "rgba(56, 189, 248, 0.15)",
+              borderDash: [6, 4],
+              tension: 0.3,
+              fill: false,
+            },
+          ],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          scales: {
+            x: {
+              ticks: { color: "#94a3b8" },
+              grid: { color: "rgba(148, 163, 184, 0.1)" },
+            },
+            y: {
+              beginAtZero: true,
+              ticks: { color: "#94a3b8", precision: 0 },
+              grid: { color: "rgba(148, 163, 184, 0.1)" },
+            },
+          },
+          plugins: {
+            legend: {
+              position: "bottom",
+              labels: { color: "#e2e8f0" },
+            },
+          },
+        },
+      });
+    }
+
+    function formatDateTime(value) {
+      if (!value) return "—";
+      try {
+        return new Date(value).toLocaleString("fr-FR", {
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+        });
+      } catch (error) {
+        return value;
+      }
+    }
+
+    fetch("/monitoring/data")
+      .then((response) => response.json())
+      .then((data) => {
+        const totals = data?.totals || {};
+        const users = data?.users || {};
+
+        setTextContent(jobsTotalEl, totals.jobs ?? "0");
+        setTextContent(jobsSuccessEl, totals.success ?? "0");
+        setTextContent(jobsFailedEl, totals.failed ?? "0");
+        const successRate = Number.parseFloat(totals.success_rate ?? 0);
+        const formattedRate = Number.isFinite(successRate)
+          ? `${successRate.toFixed(successRate >= 10 ? 0 : 1)}%`
+          : `${totals.success_rate ?? 0}%`;
+        setTextContent(successRateEl, formattedRate);
+
+        const sampleSize = totals.sample_size ?? totals.jobs ?? 0;
+        if (sampleSize > 0) {
+          setTextContent(
+            jobsSampleNoteEl,
+            `Échantillon sur ${sampleSize} dernier${sampleSize > 1 ? "s" : ""} job${sampleSize > 1 ? "s" : ""}.`
+          );
+        } else {
+          setTextContent(
+            jobsSampleNoteEl,
+            "Aucun job récent disponible pour le moment."
+          );
+        }
+
+        setTextContent(userCountEl, users.count ?? "0");
+
+        if (Array.isArray(users?.timeline?.labels) && users.timeline.labels.length > 0) {
+          const days = users.timeline.labels.length;
+          setTextContent(
+            usersNoteEl,
+            `Historique disponible sur ${days} jour${days > 1 ? "s" : ""}.`
+          );
+        } else if (users.error) {
+          setTextContent(usersNoteEl, `Erreur récupération utilisateurs : ${users.error}`);
+        }
+
+        setTextContent(refreshedEl, `Dernière mise à jour : ${formatDateTime(data.generated_at)}`);
+
+        if (data.error) {
+          errorEl?.classList.remove("hidden");
+          setTextContent(errorEl, `⚠️ ${data.error}`);
+        } else if (users.error) {
+          errorEl?.classList.remove("hidden");
+          setTextContent(errorEl, `⚠️ ${users.error}`);
+        } else {
+          errorEl?.classList.add("hidden");
+        }
+
+        renderStatusChart(data.status_breakdown);
+        renderTimelineChart(data.timeline);
+      })
+      .catch((error) => {
+        console.error("monitoring/data", error);
+        if (errorEl) {
+          errorEl.classList.remove("hidden");
+          setTextContent(
+            errorEl,
+            "⚠️ Impossible de charger les statistiques en temps réel."
+          );
+        }
+      });
+  });
+</script>
 {% endblock %}
