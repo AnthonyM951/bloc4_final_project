@@ -1,4 +1,4 @@
-# Bloc 4 - Projet génération vidéo IA
+# VideoGen For School
 
 Ce dépôt contient une application **Flask** minimale pour la génération de vidéos par IA ainsi que la documentation exigée pour la validation du Bloc 4.
 
